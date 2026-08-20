@@ -82,14 +82,26 @@ Verification is `cargo test --workspace` plus the noted assertions.
       mixer moves - matches tests/golden/session.wav sample-exactly).
       Golden created 2026-08-20 (initial). It also passes bit-identically
       across opt-levels, which is a useful determinism check.
+      Golden re-blessed 2026-08-20 for M4.1: mixer smoothing changed from
+      a one-block ramp to a fixed 5ms ramp (see M4.1). 122 of 72000
+      samples changed, worst 5 LSB, all inside the master-fader ramp at
+      the start of the render - exactly the region the change affects.
       Test profile now builds at opt-level 2: the suite was spending most
       of its time in unoptimised DSP.
 
 ## M4 - Realtime adapter (macOS first)
 
-- [ ] M4.1 Command/EngineEvent enums + rtrb SPSC queues + simulated
-      audio-thread loop (verify: identical output offline vs simulated
-      realtime across block sizes 64 vs 480, REQ-203)
+- [x] M4.1 Command/EngineEvent enums + simulated audio-thread loop
+      (verify: identical render across block sizes 37/64/480/1024,
+      blocking commands rejected while rolling, transport commands
+      clamp correctly). Two real findings, both fixed:
+      1. The adapter MUST split callback buffers at command boundaries,
+         or a command's effect lands at a different sample depending on
+         the device period. Required for M4.2.
+      2. Mixer smoothing ramped over one block, so a fader move sounded
+         different at 64 frames than at 512. Now a fixed 5ms ramp.
+      rtrb deferred to M4.2 where the real audio thread needs it, so
+      default builds and CI stay dependency-free.
 - [ ] M4.2 cpal duplex adapter behind `realtime` feature, device selection,
       48kHz negotiation, stop-gated disk work (verify: #[ignore] smoke
       tests + manual checklist; CI unaffected)

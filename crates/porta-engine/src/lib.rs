@@ -4,6 +4,7 @@
 /// Number of tape tracks. Fixed: this is a 4-track machine.
 pub const NUM_TRACKS: usize = 4;
 
+pub mod command;
 pub mod engine;
 pub mod mixer;
 pub mod project;
