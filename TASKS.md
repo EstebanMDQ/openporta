@@ -22,7 +22,7 @@ Verification is `cargo test --workspace` plus the noted assertions.
       dirty-chunk bitmap (verify: roundtrip, bounds, dirty tracking)
 - [x] M1.2 Transport state machine + sample-accurate playhead, seek/rew/ff
       (verify: transition and position tests)
-- [ ] M1.3 Playback mixer: fader/pan/master with per-block smoothing,
+- [x] M1.3 Playback mixer: fader/pan/master with per-block smoothing,
       process_block API (verify: RMS math, equal-power pan at center, no
       clicks on fader jumps)
 - [ ] M1.4 Record pass: punch crossfades, displaced-audio capture, REQ-306
