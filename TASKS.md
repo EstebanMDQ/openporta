@@ -77,7 +77,13 @@ Verification is `cargo test --workspace` plus the noted assertions.
 - [x] M3.3 porta-app CLI: new/script/render/export subcommands + script
       `bounce` op (verify: cli.rs drives the real binary, bad arguments
       rejected)
-- [ ] M3.4 The one end-to-end golden render + UPDATE_GOLDEN bless flow
+- [x] M3.4 The one end-to-end golden render + UPDATE_GOLDEN bless flow
+      (verify: full session - 3 overdubs, bounce, punch, undo/redo,
+      mixer moves - matches tests/golden/session.wav sample-exactly).
+      Golden created 2026-08-20 (initial). It also passes bit-identically
+      across opt-levels, which is a useful determinism check.
+      Test profile now builds at opt-level 2: the suite was spending most
+      of its time in unoptimised DSP.
 
 ## M4 - Realtime adapter (macOS first)
 

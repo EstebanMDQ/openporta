@@ -31,3 +31,12 @@ all = { level = "warn", priority = -1 }
 
 [profile.release]
 lto = "thin"
+
+# Audio tests push a lot of samples through the DSP chain; unoptimised
+# they dominate the test run. Rust keeps IEEE float semantics at any
+# opt-level (no fast-math), so results stay bit-identical.
+[profile.test]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1

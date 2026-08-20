@@ -9,4 +9,5 @@ docker run --rm \
   -v openporta-rustup:/usr/local/rustup \
   -v openporta-cargo:/usr/local/cargo \
   -v openporta-target:/ctarget -e CARGO_TARGET_DIR=/ctarget \
+  -e UPDATE_GOLDEN \
   rust:1-slim sh -c "cargo $*; s=\$?; chown -R $(id -u):$(id -g) /work; exit \$s"
