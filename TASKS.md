@@ -25,7 +25,7 @@ Verification is `cargo test --workspace` plus the noted assertions.
 - [x] M1.3 Playback mixer: fader/pan/master with per-block smoothing,
       process_block API (verify: RMS math, equal-power pan at center, no
       clicks on fader jumps)
-- [ ] M1.4 Record pass: punch crossfades, displaced-audio capture, REQ-306
+- [x] M1.4 Record pass: punch crossfades, displaced-audio capture, REQ-306
       (verify: recorded region equality, no clicks across punch points,
       unarmed tracks byte-identical)
 - [ ] M1.5 Undo/redo stack with disk spill and cap eviction (verify:
