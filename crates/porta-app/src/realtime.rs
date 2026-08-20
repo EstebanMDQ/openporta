@@ -23,7 +23,7 @@
 //! one drops, both counted as xruns rather than papered over.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, SampleRate, StreamConfig};
+use cpal::{BufferSize, StreamConfig};
 use porta_engine::command::{Command, EngineEvent};
 use porta_engine::engine::Engine;
 use porta_engine::NUM_TRACKS;
@@ -46,15 +46,7 @@ pub enum RealtimeError {
     #[error("device '{0}' does not support 48kHz")]
     UnsupportedRate(String),
     #[error(transparent)]
-    BuildStream(#[from] cpal::BuildStreamError),
-    #[error(transparent)]
-    PlayStream(#[from] cpal::PlayStreamError),
-    #[error(transparent)]
-    Devices(#[from] cpal::DevicesError),
-    #[error(transparent)]
-    DeviceName(#[from] cpal::DeviceNameError),
-    #[error(transparent)]
-    SupportedConfigs(#[from] cpal::SupportedStreamConfigsError),
+    Cpal(#[from] cpal::Error),
 }
 
 /// List devices, so a support problem is one command away from being
@@ -63,14 +55,14 @@ pub fn list_devices() -> Result<Vec<String>, RealtimeError> {
     let host = cpal::default_host();
     let mut out = Vec::new();
     for d in host.output_devices()? {
-        let name = d.name()?;
+        let name = d.to_string();
         let rates: Vec<String> = d
             .supported_output_configs()?
             .map(|c| {
                 format!(
                     "{}-{}Hz/{}ch",
-                    c.min_sample_rate().0,
-                    c.max_sample_rate().0,
+                    c.min_sample_rate(),
+                    c.max_sample_rate(),
                     c.channels()
                 )
             })
@@ -78,28 +70,26 @@ pub fn list_devices() -> Result<Vec<String>, RealtimeError> {
         out.push(format!("output  {name} [{}]", rates.join(", ")));
     }
     for d in host.input_devices()? {
-        out.push(format!("input   {}", d.name()?));
+        out.push(format!("input   {d}"));
     }
     Ok(out)
 }
 
 fn pick(devices: impl Iterator<Item = cpal::Device>, wanted: Option<&str>) -> Option<cpal::Device> {
     let want = wanted?.to_lowercase();
-    devices.into_iter().find(|d| {
-        d.name()
-            .map(|n| n.to_lowercase().contains(&want))
-            .unwrap_or(false)
-    })
+    devices
+        .into_iter()
+        .find(|d| d.to_string().to_lowercase().contains(&want))
 }
 
 fn supports_48k(device: &cpal::Device) -> Result<cpal::SupportedStreamConfigRange, RealtimeError> {
     device
         .supported_output_configs()?
         .find(|c| {
-            c.min_sample_rate().0 <= porta_engine::SAMPLE_RATE
-                && c.max_sample_rate().0 >= porta_engine::SAMPLE_RATE
+            c.min_sample_rate() <= porta_engine::SAMPLE_RATE
+                && c.max_sample_rate() >= porta_engine::SAMPLE_RATE
         })
-        .ok_or_else(|| RealtimeError::UnsupportedRate(device.name().unwrap_or_else(|_| "?".into())))
+        .ok_or_else(|| RealtimeError::UnsupportedRate(device.to_string()))
 }
 
 /// Counters the control thread can read without disturbing audio.
@@ -174,12 +164,12 @@ pub fn start(
         .ok_or(RealtimeError::NoOutputDevice)?;
     let supported = supports_48k(&output)?;
     let out_channels = supported.channels() as usize;
-    let output_device = output.name()?;
+    let output_device = output.to_string();
 
     let period = period.unwrap_or(256).clamp(16, MAX_PERIOD);
     let out_config = StreamConfig {
         channels: supported.channels(),
-        sample_rate: SampleRate(porta_engine::SAMPLE_RATE),
+        sample_rate: porta_engine::SAMPLE_RATE,
         buffer_size: BufferSize::Fixed(period as u32),
     };
 
@@ -195,15 +185,15 @@ pub fn start(
     let (input_stream, input_name_used) = match input_device {
         None => (None, None),
         Some(device) => {
-            let name = device.name()?;
+            let name = device.to_string();
             let in_config = StreamConfig {
                 channels: 1,
-                sample_rate: SampleRate(porta_engine::SAMPLE_RATE),
+                sample_rate: porta_engine::SAMPLE_RATE,
                 buffer_size: BufferSize::Fixed(period as u32),
             };
             let counters = Arc::clone(&xruns);
             let stream = device.build_input_stream(
-                &in_config,
+                in_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     for &s in data {
                         if capture_tx.push(s).is_err() {
@@ -229,7 +219,7 @@ pub fn start(
     let counters = Arc::clone(&xruns);
 
     let stream = output.build_output_stream(
-        &out_config,
+        out_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             data.fill(0.0);
             let frames = data.len() / out_channels;
