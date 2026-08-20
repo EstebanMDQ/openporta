@@ -20,9 +20,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const GOLDEN: &str = "tests/golden/session.wav";
-/// Sample-exact by design: the engine is deterministic and block-size
-/// invariant, so any difference at all is a real change in the sound.
-const TOLERANCE: i32 = 0;
+/// Maximum tolerated per-sample difference, in 16-bit LSBs.
+///
+/// Not zero, and the reason matters. The engine is deterministic on any
+/// given machine (see the reproducibility tests in porta-engine), but
+/// the character chain calls tanh, sin, cos, exp and powf, and libm does
+/// not produce bit-identical results across platforms and versions. A
+/// golden blessed on Debian differs from the same render on Ubuntu CI by
+/// one or two LSBs on a lot of samples - about -92 dBFS, inaudible.
+///
+/// Three LSBs is the line: last-bit libm drift stays under it, while a
+/// real change in the DSP or the mixing does not. The change that
+/// prompted this comment - fixing block-dependent gain smoothing -
+/// showed up as five LSBs on far fewer samples, and would still fail.
+const TOLERANCE: i32 = 3;
 
 struct TempDir(PathBuf);
 
@@ -147,23 +158,29 @@ fn full_session_matches_the_golden_render() {
 
     let mut worst = 0i32;
     let mut worst_at = 0usize;
-    let mut differing = 0usize;
+    let mut over_tolerance = 0usize;
+    let mut any_difference = 0usize;
     for (i, (a, b)) in want.iter().zip(&got).enumerate() {
         let d = (i32::from(*a) - i32::from(*b)).abs();
+        if d > 0 {
+            any_difference += 1;
+        }
+        if d > worst {
+            worst = d;
+            worst_at = i;
+        }
         if d > TOLERANCE {
-            differing += 1;
-            if d > worst {
-                worst = d;
-                worst_at = i;
-            }
+            over_tolerance += 1;
         }
     }
     assert_eq!(
-        differing,
+        over_tolerance,
         0,
-        "the sound changed: {differing} of {} samples differ, worst {worst} \
-         at sample {worst_at}. Understand why before blessing (see the \
-         module docs).",
+        "the sound changed: {over_tolerance} of {} samples are more than \
+         {TOLERANCE} LSB off (worst {worst} at sample {worst_at}; {any_difference} \
+         samples differ at all). This is past what cross-platform libm \
+         drift explains. Understand why before blessing (see the module \
+         docs).",
         want.len()
     );
 }

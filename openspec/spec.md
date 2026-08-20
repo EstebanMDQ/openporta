@@ -129,7 +129,10 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
   reduction (default off), then TPDF dither to i16.
 - REQ-702 All stochastic elements MUST derive from the cassette noise seed
   plus the pass id; two renders of the same session script MUST be
-  bit-identical.
+  bit-identical on the same machine and toolchain. Across platforms the
+  guarantee is weaker by necessity: libm transcendentals (tanh, sin, exp,
+  powf) differ in the last bits between implementations, so renders MAY
+  differ by a couple of LSBs. Anything larger is a defect.
 - REQ-703 Processors MUST NOT allocate, lock, or perform I/O inside their
   process call.
 - REQ-704 The chain MUST be swappable behind the AudioProcessor trait; a

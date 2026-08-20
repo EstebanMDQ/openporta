@@ -82,6 +82,12 @@ Verification is `cargo test --workspace` plus the noted assertions.
       mixer moves - matches tests/golden/session.wav sample-exactly).
       Golden created 2026-08-20 (initial). It also passes bit-identically
       across opt-levels, which is a useful determinism check.
+      Golden tolerance set to 3 LSB 2026-08-20: it passed locally but
+      failed on CI with 21294/72000 samples off by 1-2 LSB (-92 dBFS,
+      inaudible). Cause is libm, not the engine - tanh/sin/exp differ in
+      the last bits between glibc versions, so a cross-platform
+      sample-exact golden is not achievable. Same-machine
+      bit-reproducibility is unaffected and still tested separately.
       Golden re-blessed 2026-08-20 for M4.1: mixer smoothing changed from
       a one-block ramp to a fixed 5ms ramp (see M4.1). 122 of 72000
       samples changed, worst 5 LSB, all inside the master-fader ramp at
