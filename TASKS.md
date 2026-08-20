@@ -18,7 +18,7 @@ Verification is `cargo test --workspace` plus the noted assertions.
 
 ## M1 - Headless tape engine (passthrough chain)
 
-- [ ] M1.1 Tape type: fixed-length i16 tracks, region read/write,
+- [x] M1.1 Tape type: fixed-length i16 tracks, region read/write,
       dirty-chunk bitmap (verify: roundtrip, bounds, dirty tracking)
 - [ ] M1.2 Transport state machine + sample-accurate playhead, seek/rew/ff
       (verify: transition and position tests)

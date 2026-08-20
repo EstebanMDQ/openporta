@@ -4,6 +4,8 @@
 /// Number of tape tracks. Fixed: this is a 4-track machine.
 pub const NUM_TRACKS: usize = 4;
 
+pub mod tape;
+
 pub use porta_dsp::SAMPLE_RATE;
 
 #[cfg(test)]
