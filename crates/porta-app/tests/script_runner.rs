@@ -156,7 +156,11 @@ fn mixer_settings_reach_the_export() {
 #[test]
 fn cassette_character_colours_the_tape() {
     let dir = TempDir::new("character");
-    write_wav_16(dir.0.join("take.wav"), &sine(1000.0, -6.0, 48_000));
+    // Tone then silence: the tone shows saturation, the recorded silence
+    // shows the hiss that was printed onto the tape.
+    let mut take = sine(1000.0, -6.0, 24_000);
+    take.extend(porta_testkit::signal::silence(24_000));
+    write_wav_16(dir.0.join("take.wav"), &take);
 
     // Same take, same seed, once clean and once through the cassette.
     for (name, character) in [("clean", "clean"), ("tape", "cassette")] {
@@ -182,17 +186,19 @@ fn cassette_character_colours_the_tape() {
     let (tape, _) = read_stereo(&dir.0.join("tape.wav"));
 
     // Saturation put harmonics on the tape that the clean pass lacks.
-    let clean_thd = thd_db(&clean[4096..], 1000.0, 7);
-    let tape_thd = thd_db(&tape[4096..], 1000.0, 7);
+    let clean_thd = thd_db(&clean[4096..20_000], 1000.0, 7);
+    let tape_thd = thd_db(&tape[4096..20_000], 1000.0, 7);
     assert!(
         tape_thd > clean_thd + 15.0,
         "clean THD {clean_thd:.1} dB vs tape {tape_thd:.1} dB"
     );
 
     // And the noise floor rose: hiss is on the tape, not on playback.
-    let quiet = |s: &[f32]| band_energy_db(&s[4096..24_000], 13_000.0, 20_000.0);
+    // Measured over the recorded-but-silent tail, in the passband where
+    // the hiss actually lives.
+    let quiet = |s: &[f32]| band_energy_db(&s[28_000..46_000], 500.0, 9000.0);
     assert!(
-        quiet(&tape) > quiet(&clean) + 10.0,
+        quiet(&tape) > quiet(&clean) + 20.0,
         "clean floor {:.1} dB vs tape {:.1} dB",
         quiet(&clean),
         quiet(&tape)

@@ -58,7 +58,12 @@ Verification is `cargo test --workspace` plus the noted assertions.
       pass), stored in the manifest, script `character` preset added
       (verify: cassette take has more THD and a higher noise floor than
       a clean take of the same source)
-- [ ] M2.8 Generation-loss acceptance test REQ-403 (milestone gate)
+- [x] M2.8 Generation-loss acceptance test REQ-403 (milestone gate)
+      (verify: 3 generations show monotonic 8kHz decay and monotonic
+      noise-floor rise, renders reproducible, passes decorrelate).
+      Note: hiss moved before the bandwidth stage - printed after it,
+      most hiss energy sat above the corner and the next generation
+      just filtered it away, so the floor barely built up.
 
 ## M3 - Bounce, export, CLI
 

@@ -3,10 +3,17 @@
 //! itself for its whole life.
 //!
 //! Stage order matters and follows the signal path of a real machine:
-//! the record amp saturates first, the head and tape limit bandwidth,
-//! the transport wobbles the whole thing, and hiss is on the tape
-//! underneath it all. Crush, when enabled, sits last as an outboard
-//! flavour rather than part of the tape path.
+//! the record amp saturates first, hiss joins the signal at the tape
+//! itself, the head and tape response then limit the bandwidth of both,
+//! and the transport wobbles what comes back. Crush, when enabled, sits
+//! last as an outboard flavour rather than part of the tape path.
+//!
+//! Hiss goes in before the bandwidth stage rather than after because
+//! that is what makes generations pile up: hiss printed inside the
+//! passband survives the next pass's filter and adds to that pass's own
+//! hiss. Adding it after the filter puts most of its energy above the
+//! corner, where the next generation simply removes it again, and the
+//! noise floor then barely moves across bounces.
 
 use crate::crush::{Crush, CrushParams};
 use crate::filter::Bandwidth;
@@ -73,13 +80,13 @@ impl TapeCharacter {
     pub fn build_chain(&self, pass_seed: u32) -> Chain {
         let mut stages: Vec<Box<dyn crate::AudioProcessor>> = vec![
             Box::new(Saturation::new(self.drive_db)),
+            Box::new(Hiss::new(self.hiss_dbfs, pass_seed ^ 0x5f5f_5f5f)),
             Box::new(Bandwidth::new(self.lpf_cutoff_hz, self.hpf_cutoff_hz)),
             Box::new(Flutter::new(
                 self.flutter_rate_hz,
                 self.flutter_depth_cents,
                 pass_seed,
             )),
-            Box::new(Hiss::new(self.hiss_dbfs, pass_seed ^ 0x5f5f_5f5f)),
         ];
         if let Some(params) = self.crush {
             stages.push(Box::new(Crush::new(params)));
