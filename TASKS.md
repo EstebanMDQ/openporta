@@ -102,11 +102,19 @@ Verification is `cargo test --workspace` plus the noted assertions.
          different at 64 frames than at 512. Now a fixed 5ms ramp.
       rtrb deferred to M4.2 where the real audio thread needs it, so
       default builds and CI stay dependency-free.
-- [ ] M4.2 cpal duplex adapter behind `realtime` feature, device selection,
-      48kHz negotiation, stop-gated disk work (verify: #[ignore] smoke
-      tests + manual checklist; CI unaffected)
-- [ ] M4.3 Metering, xrun counter, latency report (verify: simulated meter
-      math tests; manual checklist; notify owner for hands-on session)
+- [x] M4.2 cpal adapter behind `realtime` feature: device listing and
+      substring selection, 48kHz negotiation, input/output joined by a
+      wait-free ring, buffers split at command boundaries, blocking
+      commands bounced to the control thread, `devices` and `live` CLI
+      commands. Verified by clippy -D warnings with the feature on;
+      CI unaffected (feature off by default).
+- [x] M4.3 Xrun counters (output / input-starved / input-dropped) and a
+      device+period report printed by `live`.
+- [!] M4-hardware BLOCKED 2026-08-20: needs a hands-on session on the
+      MacBook with the Zoom L6. Nothing further can be verified here -
+      this host has no audio hardware. Checklist in
+      docs/manual-checklist.md. Fill in the lowest reliable period and
+      any findings, then M6 can reuse the same procedure on the Pi.
 
 ## M5 - Slint UI
 

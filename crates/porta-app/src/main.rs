@@ -1,5 +1,7 @@
 //! openporta CLI.
 
+#[cfg(feature = "realtime")]
+mod realtime;
 mod render;
 mod script;
 
@@ -19,7 +21,11 @@ usage:
   porta-app export <dir> --out <file.wav> [--seconds N] [--bits 16|24]
 
 render and export are the same thing: a stereo mixdown of the whole tape
-from the start, or of the first N seconds.";
+from the start, or of the first N seconds.
+
+built with --features realtime:
+  porta-app devices
+  porta-app live <dir> [--in NAME] [--out NAME] [--period N]";
 
 /// Minimal flag parsing: `--name value`. Returns the value if present.
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -98,12 +104,84 @@ fn cmd_script(args: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "realtime")]
+fn cmd_devices() -> Result<(), String> {
+    for line in realtime::list_devices().map_err(|e| e.to_string())? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Drive a cassette from the keyboard against real hardware. This is the
+/// harness for the manual checklist in docs/manual-checklist.md; the UI
+/// proper arrives in M5.
+#[cfg(feature = "realtime")]
+fn cmd_live(args: &[String]) -> Result<(), String> {
+    use porta_engine::command::Command;
+    use std::io::BufRead;
+
+    let dir = args.first().ok_or("live needs a project directory")?;
+    let engine = Engine::open(dir).map_err(|e| e.to_string())?;
+    let period = parse_num::<usize>(args, "--period")?;
+    let mut session = realtime::start(engine, flag(args, "--in"), flag(args, "--out"), period)
+        .map_err(|e| e.to_string())?;
+
+    println!("output: {}", session.output_device);
+    println!(
+        "input:  {}",
+        session.input_device.as_deref().unwrap_or("(none)")
+    );
+    println!("period: {} frames", session.period);
+    println!("keys: p play, s stop, r record, 1-4 arm, [ rew, ] ff, q quit");
+
+    for line in std::io::stdin().lock().lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let cmd = match line.trim() {
+            "p" => Some(Command::Play),
+            "s" => Some(Command::Stop),
+            "r" => Some(Command::Record),
+            "[" => Some(Command::Rewind { samples: 48_000 }),
+            "]" => Some(Command::FastForward { samples: 48_000 }),
+            t if matches!(t, "1" | "2" | "3" | "4") => {
+                let track = t.parse::<usize>().unwrap() - 1;
+                Some(Command::Arm { track, on: true })
+            }
+            "q" => break,
+            "" => None,
+            other => {
+                eprintln!("unknown key '{other}'");
+                None
+            }
+        };
+        if let Some(c) = cmd {
+            if session.send(c).is_err() {
+                eprintln!("command queue full or command not allowed while rolling");
+            }
+        }
+        for event in session.poll() {
+            if !matches!(event, porta_engine::command::EngineEvent::Playhead { .. }) {
+                println!("  {event:?}");
+            }
+        }
+    }
+    println!("xruns: {}", session.xrun_summary());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("new") => cmd_new(&args[1..]),
         Some("script") => cmd_script(&args[1..]),
         Some("render") | Some("export") => cmd_render(&args[1..]),
+        #[cfg(feature = "realtime")]
+        Some("devices") => cmd_devices(),
+        #[cfg(feature = "realtime")]
+        Some("live") => cmd_live(&args[1..]),
+        #[cfg(not(feature = "realtime"))]
+        Some(c @ ("devices" | "live")) => Err(format!(
+            "{c} needs the realtime feature: cargo run -p porta-app --features realtime -- {c}"
+        )),
         Some("--help") | Some("-h") | Some("help") | None => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;

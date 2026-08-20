@@ -1,0 +1,7 @@
+# Dev image for hosts without a native Rust toolchain. Adds the C
+# toolchain and ALSA headers so the `realtime` feature (cpal) can at
+# least be type-checked here; actually running audio needs real hardware.
+FROM rust:1-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libasound2-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*

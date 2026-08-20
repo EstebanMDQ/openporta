@@ -11,14 +11,16 @@ hound = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+cpal = { version = "0.16", optional = true }
+rtrb = { version = "0.3", optional = true }
 
 [dev-dependencies]
 porta-testkit = { workspace = true }
 
 [features]
 default = []
-# realtime = ["cpal", "rtrb"]   # enabled in M4
-# ui = ["slint"]                # enabled in M5
+realtime = ["dep:cpal", "dep:rtrb"]
+# ui = ["slint"]   # enabled in M5
 
 [lints]
 workspace = true
