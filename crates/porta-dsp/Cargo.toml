@@ -1,0 +1,14 @@
+[package]
+name = "porta-dsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rand = { workspace = true }
+
+[dev-dependencies]
+porta-testkit = { workspace = true }
+
+[lints]
+workspace = true

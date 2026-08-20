@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/porta-dsp",
+    "crates/porta-engine",
+    "crates/porta-testkit",
+    "crates/porta-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+porta-dsp = { path = "crates/porta-dsp" }
+porta-engine = { path = "crates/porta-engine" }
+porta-testkit = { path = "crates/porta-testkit" }
+rand = { version = "0.9", default-features = false, features = ["small_rng"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+hound = "3.5"
+rustfft = "6"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"

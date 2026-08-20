@@ -1,0 +1,13 @@
+[package]
+name = "porta-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rustfft = { workspace = true }
+hound = { workspace = true }
+rand = { workspace = true }
+
+[lints]
+workspace = true
