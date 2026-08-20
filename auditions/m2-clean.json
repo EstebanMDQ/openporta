@@ -1,0 +1,10 @@
+{"ops":[
+  {"op":"new","dir":"clean.porta","minutes":1,"seed":7,"character":"clean"},
+  {"op":"arm","track":0},
+  {"op":"record","input_wav":"source.wav"},
+  {"op":"arm","track":0,"on":false},
+  {"op":"seek","seconds":0},
+  {"op":"export","out":"discard2.wav"},
+  {"op":"play","seconds":6},
+  {"op":"export","out":"m2-clean.wav"}
+]}

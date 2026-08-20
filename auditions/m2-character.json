@@ -1,0 +1,10 @@
+{"ops":[
+  {"op":"new","dir":"audition.porta","minutes":1,"seed":7,"character":"cassette"},
+  {"op":"arm","track":0},
+  {"op":"record","input_wav":"source.wav"},
+  {"op":"arm","track":0,"on":false},
+  {"op":"seek","seconds":0},
+  {"op":"export","out":"discard.wav"},
+  {"op":"play","seconds":6},
+  {"op":"export","out":"m2-cassette.wav"}
+]}

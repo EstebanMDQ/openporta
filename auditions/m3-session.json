@@ -1,0 +1,22 @@
+{"ops":[
+  {"op":"new","dir":"m3.porta","minutes":0.5,"seed":1979},
+  {"op":"arm","track":0},
+  {"op":"record","input_wav":"source.wav"},
+  {"op":"arm","track":0,"on":false},
+  {"op":"arm","track":1},
+  {"op":"record","input_wav":"source.wav"},
+  {"op":"arm","track":1,"on":false},
+  {"op":"arm","track":2},
+  {"op":"record","input_wav":"source.wav"},
+  {"op":"arm","track":2,"on":false},
+  {"op":"pan","track":1,"value":-0.5},
+  {"op":"pan","track":2,"value":0.5},
+  {"op":"bounce"},
+  {"op":"fader","track":0,"db":-60},
+  {"op":"fader","track":1,"db":-60},
+  {"op":"fader","track":2,"db":-60},
+  {"op":"seek","seconds":0},
+  {"op":"export","out":"discard.wav"},
+  {"op":"play","seconds":6},
+  {"op":"export","out":"m3-bounced-gen2.wav"}
+]}

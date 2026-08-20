@@ -1,3 +1,6 @@
 /target
-/auditions/
+# Audition renders are large and regenerable; the scripts that make them
+# are not.
+/auditions/*.wav
+/auditions/*.porta/
 *.porta/
