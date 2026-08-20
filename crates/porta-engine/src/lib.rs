@@ -5,6 +5,7 @@
 pub const NUM_TRACKS: usize = 4;
 
 pub mod tape;
+pub mod transport;
 
 pub use porta_dsp::SAMPLE_RATE;
 

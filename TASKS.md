@@ -20,7 +20,7 @@ Verification is `cargo test --workspace` plus the noted assertions.
 
 - [x] M1.1 Tape type: fixed-length i16 tracks, region read/write,
       dirty-chunk bitmap (verify: roundtrip, bounds, dirty tracking)
-- [ ] M1.2 Transport state machine + sample-accurate playhead, seek/rew/ff
+- [x] M1.2 Transport state machine + sample-accurate playhead, seek/rew/ff
       (verify: transition and position tests)
 - [ ] M1.3 Playback mixer: fader/pan/master with per-block smoothing,
       process_block API (verify: RMS math, equal-power pan at center, no
