@@ -59,8 +59,10 @@ version = "0.1.0"
 dependencies = [
  "hound",
  "porta-engine",
+ "porta-testkit",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

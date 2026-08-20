@@ -9,6 +9,10 @@ porta-engine = { workspace = true }
 hound = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+porta-testkit = { workspace = true }
 
 [features]
 default = []

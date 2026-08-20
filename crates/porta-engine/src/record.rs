@@ -71,6 +71,23 @@ impl RecordPass {
         }
     }
 
+    /// Pre-size the pass buffers so `write_block` never allocates
+    /// (REQ-902). `capacity` is the most samples the pass can write, i.e.
+    /// tape length minus the start position; `max_block` the largest block
+    /// the caller will hand over.
+    pub fn with_capacity(
+        track: usize,
+        start: usize,
+        seed: u32,
+        capacity: usize,
+        max_block: usize,
+    ) -> Self {
+        let mut p = Self::new(track, start, seed);
+        p.displaced.reserve_exact(capacity);
+        p.scratch.reserve_exact(max_block.max(XFADE_SAMPLES));
+        p
+    }
+
     /// Samples written so far.
     pub fn len(&self) -> usize {
         self.displaced.len()

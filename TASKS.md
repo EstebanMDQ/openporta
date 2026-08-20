@@ -32,8 +32,9 @@ Verification is `cargo test --workspace` plus the noted assertions.
       byte-equal restore, redo symmetry, eviction)
 - [x] M1.6 Project persistence: manifest + chunked track files, save/load
       (verify: roundtrip equality, only-dirty-chunks-written)
-- [ ] M1.7 Session-script runner + debug WAV dump (verify: scripted
-      record-then-play renders expected signal, WAV header/length correct)
+- [x] M1.7 Engine facade + session-script runner + WAV export (verify:
+      scripted record-then-play renders expected signal, WAV
+      header/length correct, block-size invariance)
 
 ## M2 - Lo-fi DSP
 
