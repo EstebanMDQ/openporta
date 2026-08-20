@@ -41,10 +41,12 @@ Verification is `cargo test --workspace` plus the noted assertions.
 - [x] M2.1 Chain ordering + block-size invariance harness in
       porta_dsp::testing (verify: identity, stage order, split
       equivalence across block sizes 1/37/64/128/512/4096)
-- [ ] M2.2 Saturation (tanh drive + makeup) (verify: THD above/below drive
+- [x] M2.2 Saturation (tanh drive + makeup) (verify: THD above/below drive
       threshold, no NaN under abusive input)
-- [ ] M2.3 Bandwidth limiting: biquad LPF ~10kHz + HPF ~60Hz (verify:
-      attenuation and passband assertions)
+- [x] M2.3 Bandwidth limiting: 2x Butterworth LPF biquad @11kHz + HPF
+      @60Hz (verify: attenuation and passband assertions). Note: one-pole
+      cascades were tried first and rejected - they flatten near Nyquist
+      and leave 20kHz only 9 dB down, too bright for cassette.
 - [ ] M2.4 Hiss: seeded filtered noise (verify: noise-floor window, seed
       determinism)
 - [ ] M2.5 Wow/flutter: LFO + drift on fractional delay, cubic

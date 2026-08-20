@@ -1,6 +1,8 @@
 //! Lo-fi tape character DSP: the AudioProcessor trait and the processors
 //! that get baked onto tape at record time.
 
+pub mod filter;
+pub mod saturation;
 pub mod testing;
 
 /// Internal engine sample rate. Fixed for v1; no runtime plumbing.
