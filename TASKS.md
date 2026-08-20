@@ -38,9 +38,9 @@ Verification is `cargo test --workspace` plus the noted assertions.
 
 ## M2 - Lo-fi DSP
 
-- [ ] M2.1 Chain plumbing already present; add block-splitting so chains
-      accept arbitrary lengths up to MAX_BLOCK (verify: identity + split
-      equivalence)
+- [x] M2.1 Chain ordering + block-size invariance harness in
+      porta_dsp::testing (verify: identity, stage order, split
+      equivalence across block sizes 1/37/64/128/512/4096)
 - [ ] M2.2 Saturation (tanh drive + makeup) (verify: THD above/below drive
       threshold, no NaN under abusive input)
 - [ ] M2.3 Bandwidth limiting: biquad LPF ~10kHz + HPF ~60Hz (verify:
