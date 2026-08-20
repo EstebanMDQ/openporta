@@ -12,6 +12,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 porta-testkit = { workspace = true }
+porta-dsp = { workspace = true }
 
 [lints]
 workspace = true

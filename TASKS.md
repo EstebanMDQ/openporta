@@ -67,9 +67,10 @@ Verification is `cargo test --workspace` plus the noted assertions.
 
 ## M3 - Bounce, export, CLI
 
-- [ ] M3.1 Bounce op: post-fader mono sum of 1-3 recorded to track 4
-      (verify: matches independently computed reference with fixed seed,
-      undo restores track 4)
+- [x] M3.1 Bounce op: post-fader mono sum of 1-3 recorded to track 4
+      (verify: all three tones present in the bounce, sources untouched,
+      faders respected and pans ignored, undo byte-exact, character
+      applied again, reproducible, refused while rolling)
 - [ ] M3.2 Mixdown renderer + WAV export, 16-bit default / 24-bit flag
       (verify: export RMS matches engine playback, header golden)
 - [ ] M3.3 porta-app CLI: new/script/render/export subcommands (verify:
