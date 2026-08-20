@@ -28,7 +28,7 @@ Verification is `cargo test --workspace` plus the noted assertions.
 - [x] M1.4 Record pass: punch crossfades, displaced-audio capture, REQ-306
       (verify: recorded region equality, no clicks across punch points,
       unarmed tracks byte-identical)
-- [ ] M1.5 Undo/redo stack with disk spill and cap eviction (verify:
+- [x] M1.5 Undo/redo stack with disk spill and cap eviction (verify:
       byte-equal restore, redo symmetry, eviction)
 - [ ] M1.6 Project persistence: manifest + chunked track files, save/load
       (verify: roundtrip equality, only-dirty-chunks-written)

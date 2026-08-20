@@ -8,6 +8,7 @@ pub mod mixer;
 pub mod record;
 pub mod tape;
 pub mod transport;
+pub mod undo;
 
 pub use porta_dsp::SAMPLE_RATE;
 
