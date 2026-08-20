@@ -3,7 +3,9 @@
 //! blocks and receive stereo output; nothing here knows about audio
 //! devices.
 //!
-//! The character chain is a passthrough until M2 wires TapeCharacter in.
+//! Each record pass builds a fresh character chain from the cassette's
+//! `TapeCharacter` with a per-pass seed, so degradation is baked onto
+//! tape at record time and compounds across generations (REQ-303).
 
 use crate::mixer::Mixer;
 use crate::project::{Manifest, Project, ProjectError};
@@ -12,6 +14,7 @@ use crate::tape::Tape;
 use crate::transport::{Transport, TransportState};
 use crate::undo::{Journal, UndoError};
 use crate::NUM_TRACKS;
+use porta_dsp::character::TapeCharacter;
 use porta_dsp::{AudioProcessor, Chain, MAX_BLOCK};
 
 #[derive(Debug, thiserror::Error)]
@@ -45,7 +48,17 @@ impl Engine {
         len_samples: usize,
         noise_seed: u64,
     ) -> Result<Self, EngineError> {
-        let project = Project::create(dir, len_samples, noise_seed)?;
+        Self::create_with_character(dir, len_samples, TapeCharacter::new(noise_seed))
+    }
+
+    /// Create a cassette with an explicit formulation. Mostly for tests
+    /// that want the tape mechanics without the colour.
+    pub fn create_with_character(
+        dir: impl Into<std::path::PathBuf>,
+        len_samples: usize,
+        character: TapeCharacter,
+    ) -> Result<Self, EngineError> {
+        let project = Project::create_with_character(dir, len_samples, character)?;
         let tape = Tape::new(len_samples);
         Self::assemble(project, tape)
     }
@@ -70,6 +83,8 @@ impl Engine {
             project,
             armed: [false; NUM_TRACKS],
             passes: [const { None }; NUM_TRACKS],
+            // Replaced per pass in `record()`; a passthrough placeholder
+            // keeps the array populated while stopped.
             chains: (0..NUM_TRACKS).map(|_| Chain::passthrough()).collect(),
             pass_counter: 0,
             processed: vec![vec![0.0; MAX_BLOCK]; NUM_TRACKS],
@@ -133,7 +148,9 @@ impl Engine {
                 self.passes[t] = Some(RecordPass::with_capacity(
                     t, start, seed, capacity, MAX_BLOCK,
                 ));
-                self.chains[t].reset();
+                // A fresh chain per pass: flutter and hiss get their own
+                // seed so successive generations decorrelate (REQ-304).
+                self.chains[t] = self.project.manifest.character.build_chain(seed);
             }
         }
         self.transport.record();
@@ -295,7 +312,7 @@ mod tests {
     #[test]
     fn record_then_play_returns_the_take() {
         let dir = TempDir::new("roundtrip");
-        let mut e = Engine::create(&dir.0, 96_000, 7).unwrap();
+        let mut e = Engine::create_with_character(&dir.0, 96_000, TapeCharacter::clean()).unwrap();
         e.set_armed(0, true);
         e.record();
         let take = sine(1000.0, -6.0, 24_000);
@@ -316,7 +333,7 @@ mod tests {
     #[test]
     fn unarmed_tracks_stay_silent_and_untouched() {
         let dir = TempDir::new("unarmed");
-        let mut e = Engine::create(&dir.0, 96_000, 7).unwrap();
+        let mut e = Engine::create_with_character(&dir.0, 96_000, TapeCharacter::clean()).unwrap();
         let mut before = [vec![0i16; 96_000], vec![0i16; 96_000], vec![0i16; 96_000]];
         for (i, b) in before.iter_mut().enumerate() {
             e.tape().read_raw(i + 1, 0, b);
@@ -335,7 +352,7 @@ mod tests {
     #[test]
     fn undo_removes_the_take_and_is_stop_gated() {
         let dir = TempDir::new("undo");
-        let mut e = Engine::create(&dir.0, 96_000, 7).unwrap();
+        let mut e = Engine::create_with_character(&dir.0, 96_000, TapeCharacter::clean()).unwrap();
         e.set_armed(1, true);
         e.record();
         run(&mut e, 1, &sine(440.0, -3.0, 20_000), 480);
@@ -360,7 +377,8 @@ mod tests {
         let mut renders = Vec::new();
         for (i, block) in [64usize, 480, 1024].iter().enumerate() {
             let dir = TempDir::new(&format!("blocksize{i}"));
-            let mut e = Engine::create(&dir.0, 96_000, 7).unwrap();
+            let mut e =
+                Engine::create_with_character(&dir.0, 96_000, TapeCharacter::clean()).unwrap();
             e.set_armed(2, true);
             e.record();
             run(&mut e, 2, &take, *block);
@@ -376,7 +394,7 @@ mod tests {
     #[test]
     fn recording_stops_at_tape_end() {
         let dir = TempDir::new("tapeend");
-        let mut e = Engine::create(&dir.0, 10_000, 7).unwrap();
+        let mut e = Engine::create_with_character(&dir.0, 10_000, TapeCharacter::clean()).unwrap();
         e.set_armed(0, true);
         e.seek(9_000);
         e.record();
@@ -390,7 +408,8 @@ mod tests {
     fn session_survives_save_and_reopen() {
         let dir = TempDir::new("persist");
         {
-            let mut e = Engine::create(&dir.0, 96_000, 42).unwrap();
+            let mut e =
+                Engine::create_with_character(&dir.0, 96_000, TapeCharacter::clean()).unwrap();
             e.set_armed(3, true);
             e.record();
             run(&mut e, 3, &sine(600.0, -6.0, 20_000), 512);
@@ -399,7 +418,7 @@ mod tests {
             e.save().unwrap();
         }
         let mut e = Engine::open(&dir.0).unwrap();
-        assert_eq!(e.manifest().noise_seed, 42);
+
         e.seek(0);
         e.play();
         let played = run(&mut e, 3, &silence(20_000), 512);

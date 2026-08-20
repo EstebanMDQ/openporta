@@ -2,6 +2,7 @@
 //! headlessly. This is how integration tests exercise the machine and how
 //! audition renders are produced without touching audio hardware.
 
+use porta_dsp::character::TapeCharacter;
 use porta_engine::engine::{Engine, EngineError};
 use porta_engine::NUM_TRACKS;
 use std::path::{Path, PathBuf};
@@ -27,13 +28,16 @@ pub enum ScriptError {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
-    /// Create a new cassette. `minutes` defaults to 15.
+    /// Create a new cassette. `minutes` defaults to 15, `character` to
+    /// the standard cassette formulation.
     New {
         dir: String,
         #[serde(default)]
         minutes: Option<f32>,
         #[serde(default)]
         seed: Option<u64>,
+        #[serde(default)]
+        character: Option<CharacterPreset>,
     },
     Open {
         dir: String,
@@ -76,6 +80,27 @@ pub enum Op {
 
 fn yes() -> bool {
     true
+}
+
+/// Cassette formulations a script can ask for. `Clean` exists so tests
+/// and utility renders can exercise the transport without the colour.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CharacterPreset {
+    Cassette,
+    Clean,
+}
+
+impl CharacterPreset {
+    fn build(self, seed: u64) -> TapeCharacter {
+        match self {
+            Self::Cassette => TapeCharacter::new(seed),
+            Self::Clean => TapeCharacter {
+                noise_seed: seed,
+                ..TapeCharacter::clean()
+            },
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -131,10 +156,22 @@ impl Runner {
 
     fn exec(&mut self, op: &Op) -> Result<(), ScriptError> {
         match op {
-            Op::New { dir, minutes, seed } => {
+            Op::New {
+                dir,
+                minutes,
+                seed,
+                character,
+            } => {
                 let len =
                     (porta_engine::SAMPLE_RATE as f32 * 60.0 * minutes.unwrap_or(15.0)) as usize;
-                self.engine = Some(Engine::create(self.path(dir), len, seed.unwrap_or(0))?);
+                let character = character
+                    .unwrap_or(CharacterPreset::Cassette)
+                    .build(seed.unwrap_or(0));
+                self.engine = Some(Engine::create_with_character(
+                    self.path(dir),
+                    len,
+                    character,
+                )?);
             }
             Op::Open { dir } => {
                 self.engine = Some(Engine::open(self.path(dir))?);

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 porta-engine = { workspace = true }
+porta-dsp = { workspace = true }
 hound = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

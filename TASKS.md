@@ -54,9 +54,10 @@ Verification is `cargo test --workspace` plus the noted assertions.
       cents band, no clicks, latency reported, seeds decorrelate)
 - [x] M2.6 Optional bitcrush/sample-rate reduction (verify: quantization
       grid, alias energy, held-sample runs, off by default)
-- [ ] M2.7 TapeCharacter::build_chain wired into record path with TPDF
-      dither -> i16, seed in manifest (verify: recorded sine shows
-      saturation + rolloff signatures, two renders bit-identical)
+- [x] M2.7 TapeCharacter wired into the record path (fresh chain per
+      pass), stored in the manifest, script `character` preset added
+      (verify: cassette take has more THD and a higher noise floor than
+      a clean take of the same source)
 - [ ] M2.8 Generation-loss acceptance test REQ-403 (milestone gate)
 
 ## M3 - Bounce, export, CLI

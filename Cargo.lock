@@ -58,6 +58,7 @@ name = "porta-app"
 version = "0.1.0"
 dependencies = [
  "hound",
+ "porta-dsp",
  "porta-engine",
  "porta-testkit",
  "serde",

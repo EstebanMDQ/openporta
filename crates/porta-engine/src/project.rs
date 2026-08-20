@@ -14,6 +14,7 @@
 use crate::mixer::Mixer;
 use crate::tape::{Tape, CHUNK_SAMPLES};
 use crate::NUM_TRACKS;
+use porta_dsp::character::TapeCharacter;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -30,6 +31,9 @@ pub enum ProjectError {
 pub struct Manifest {
     pub len_samples: usize,
     pub noise_seed: u64,
+    /// The cassette's formulation, fixed at creation (REQ-103).
+    #[serde(default = "TapeCharacter::default")]
+    pub character: TapeCharacter,
     pub playhead: usize,
     pub fader_db: [f32; NUM_TRACKS],
     pub pan: [f32; NUM_TRACKS],
@@ -38,9 +42,14 @@ pub struct Manifest {
 
 impl Manifest {
     pub fn new(len_samples: usize, noise_seed: u64) -> Self {
+        Self::with_character(len_samples, TapeCharacter::new(noise_seed))
+    }
+
+    pub fn with_character(len_samples: usize, character: TapeCharacter) -> Self {
         Self {
             len_samples,
-            noise_seed,
+            noise_seed: character.noise_seed,
+            character,
             playhead: 0,
             fader_db: [0.0; NUM_TRACKS],
             pan: [0.0; NUM_TRACKS],
@@ -81,6 +90,14 @@ impl Project {
         len_samples: usize,
         noise_seed: u64,
     ) -> Result<Self, ProjectError> {
+        Self::create_with_character(dir, len_samples, TapeCharacter::new(noise_seed))
+    }
+
+    pub fn create_with_character(
+        dir: impl Into<PathBuf>,
+        len_samples: usize,
+        character: TapeCharacter,
+    ) -> Result<Self, ProjectError> {
         let dir = dir.into();
         fs::create_dir_all(dir.join("tape"))?;
         fs::create_dir_all(dir.join("undo"))?;
@@ -90,7 +107,7 @@ impl Project {
         }
         let project = Self {
             dir,
-            manifest: Manifest::new(len_samples, noise_seed),
+            manifest: Manifest::with_character(len_samples, character),
         };
         project.write_manifest()?;
         Ok(project)
