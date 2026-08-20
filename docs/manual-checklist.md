@@ -51,7 +51,14 @@ Cross-check against the headless renderer:
 Findings (fill in):
 
 - macOS lowest reliable period: ______
-- Notes: ______
+- Notes: cpal 0.16.0's macOS device enumeration segfaulted reliably on
+  `devices` (UB from a non-mut out-param in coreaudio device listing);
+  fixed by bumping to cpal 0.18. Separately, going record -> stop
+  reliably logged a CoreAudio buffer overrun at --period 256, not
+  reflected in the app's own xrun counters - root cause is a disk write
+  and allocation reachable from `Command::Stop` inside the realtime
+  callback (REQ-902 violation), tracked as M4.4 in TASKS.md. Re-run the
+  period/xrun steps above once M4.4 lands.
 
 ## M5 - UI
 

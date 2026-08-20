@@ -121,6 +121,24 @@ Verification is `cargo test --workspace` plus the noted assertions.
       this host has no audio hardware. Checklist in
       docs/manual-checklist.md. Fill in the lowest reliable period and
       any findings, then M6 can reuse the same procedure on the Pi.
+- [ ] M4.4 REQ-902 violation found 2026-08-20 during the hardware
+      checklist: Command::Stop reliably triggered a CoreAudio buffer
+      overrun on the L6 at --period 256 going record -> stop, invisible
+      to the app's own Xrun counters. Command::Stop.is_blocking() ==
+      false, so it runs on the realtime output-callback thread; the
+      handler chain (Engine::stop -> close_passes -> Journal::push_pass,
+      undo.rs) does a heap allocation sized to the whole pass and a
+      synchronous fs::File::create + write_all there. Engine::record has
+      the same class of bug: RecordPass::with_capacity reserve_exacts up
+      to the remaining tape length (record.rs), also inside the
+      callback. Fix needs pass finalization split across the
+      control/audio boundary - the audio thread stops capturing and
+      hands the finished pass off (existing event queue can likely
+      carry it), journal write happens on the control thread. Verify:
+      new test asserting no fs/alloc calls reachable from the realtime
+      Stop/Record path (or a callback-timing regression test), plus a
+      repeat of the manual checklist's record/stop step showing zero
+      cpal-reported xruns.
 
 ## M5 - Slint UI
 
