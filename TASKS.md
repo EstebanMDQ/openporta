@@ -47,11 +47,11 @@ Verification is `cargo test --workspace` plus the noted assertions.
       @60Hz (verify: attenuation and passband assertions). Note: one-pole
       cascades were tried first and rejected - they flatten near Nyquist
       and leave 20kHz only 9 dB down, too bright for cassette.
-- [ ] M2.4 Hiss: seeded filtered noise (verify: noise-floor window, seed
-      determinism)
-- [ ] M2.5 Wow/flutter: LFO + drift on fractional delay, cubic
-      interpolation (verify: pitch-probe deviation in cents band at
-      configured rate, no clicks, latency reported)
+- [x] M2.4 Hiss: seeded, high-tilted noise (verify: noise-floor window,
+      seed determinism, spectral tilt)
+- [x] M2.5 Wow/flutter: wow sine + flutter random walk on a fractional
+      delay, Catmull-Rom interpolation (verify: pitch-probe deviation in
+      cents band, no clicks, latency reported, seeds decorrelate)
 - [ ] M2.6 Optional bitcrush/sample-rate reduction (verify: quantization
       step and alias energy when on, bit-transparent when off)
 - [ ] M2.7 TapeCharacter::build_chain wired into record path with TPDF

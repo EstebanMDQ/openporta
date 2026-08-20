@@ -2,6 +2,8 @@
 //! that get baked onto tape at record time.
 
 pub mod filter;
+pub mod flutter;
+pub mod noise;
 pub mod saturation;
 pub mod testing;
 
