@@ -11,7 +11,7 @@ Verification is `cargo test --workspace` plus the noted assertions.
 - [x] M0.3 Spec, workflow docs, task queue, rubric agents; delete old spec
 - [x] M0.4 testkit: generators (sine/sweep/noise/impulse/silence/dc) +
       RMS/peak meters in dBFS (verify: full-scale sine RMS = -3.01 dBFS)
-- [ ] M0.5 testkit: FFT band energy, click detector, pitch-deviation probe,
+- [x] M0.5 testkit: FFT band energy, click detector, pitch-deviation probe,
       WAV helpers, assert macros (verify: detector catches injected
       discontinuity, passes clean sine; band energy concentrates at sine
       frequency)
