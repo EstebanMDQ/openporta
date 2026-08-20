@@ -1,6 +1,8 @@
 //! Lo-fi tape character DSP: the AudioProcessor trait and the processors
 //! that get baked onto tape at record time.
 
+pub mod character;
+pub mod crush;
 pub mod filter;
 pub mod flutter;
 pub mod noise;

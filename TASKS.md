@@ -52,8 +52,8 @@ Verification is `cargo test --workspace` plus the noted assertions.
 - [x] M2.5 Wow/flutter: wow sine + flutter random walk on a fractional
       delay, Catmull-Rom interpolation (verify: pitch-probe deviation in
       cents band, no clicks, latency reported, seeds decorrelate)
-- [ ] M2.6 Optional bitcrush/sample-rate reduction (verify: quantization
-      step and alias energy when on, bit-transparent when off)
+- [x] M2.6 Optional bitcrush/sample-rate reduction (verify: quantization
+      grid, alias energy, held-sample runs, off by default)
 - [ ] M2.7 TapeCharacter::build_chain wired into record path with TPDF
       dither -> i16, seed in manifest (verify: recorded sine shows
       saturation + rolloff signatures, two renders bit-identical)

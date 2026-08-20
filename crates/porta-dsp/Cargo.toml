@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 rand = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 porta-testkit = { workspace = true }
