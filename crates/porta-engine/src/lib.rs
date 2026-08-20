@@ -5,6 +5,7 @@
 pub const NUM_TRACKS: usize = 4;
 
 pub mod mixer;
+pub mod project;
 pub mod record;
 pub mod tape;
 pub mod transport;

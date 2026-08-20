@@ -30,7 +30,7 @@ Verification is `cargo test --workspace` plus the noted assertions.
       unarmed tracks byte-identical)
 - [x] M1.5 Undo/redo stack with disk spill and cap eviction (verify:
       byte-equal restore, redo symmetry, eviction)
-- [ ] M1.6 Project persistence: manifest + chunked track files, save/load
+- [x] M1.6 Project persistence: manifest + chunked track files, save/load
       (verify: roundtrip equality, only-dirty-chunks-written)
 - [ ] M1.7 Session-script runner + debug WAV dump (verify: scripted
       record-then-play renders expected signal, WAV header/length correct)
