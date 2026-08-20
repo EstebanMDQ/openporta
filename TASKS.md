@@ -71,10 +71,12 @@ Verification is `cargo test --workspace` plus the noted assertions.
       (verify: all three tones present in the bounce, sources untouched,
       faders respected and pans ignored, undo byte-exact, character
       applied again, reproducible, refused while rolling)
-- [ ] M3.2 Mixdown renderer + WAV export, 16-bit default / 24-bit flag
-      (verify: export RMS matches engine playback, header golden)
-- [ ] M3.3 porta-app CLI: new/script/render/export subcommands (verify:
-      integration tests drive the binary via scripts)
+- [x] M3.2 Mixdown renderer + WAV export, 16-bit default / 24-bit flag
+      (verify: script export and render command are byte-identical,
+      headers correct at both depths)
+- [x] M3.3 porta-app CLI: new/script/render/export subcommands + script
+      `bounce` op (verify: cli.rs drives the real binary, bad arguments
+      rejected)
 - [ ] M3.4 The one end-to-end golden render + UPDATE_GOLDEN bless flow
 
 ## M4 - Realtime adapter (macOS first)

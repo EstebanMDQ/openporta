@@ -2,6 +2,7 @@
 //! headlessly. This is how integration tests exercise the machine and how
 //! audition renders are produced without touching audio hardware.
 
+use crate::render::{self, BitDepth};
 use porta_dsp::character::TapeCharacter;
 use porta_engine::engine::{Engine, EngineError};
 use porta_engine::NUM_TRACKS;
@@ -72,9 +73,14 @@ pub enum Op {
     Undo,
     Redo,
     Save,
+    /// Sum tracks 1-3 onto track 4, destructively.
+    Bounce,
     /// Write the stereo mixdown captured since the last export to a WAV.
+    /// `bits` accepts "16" (default) or "24".
     Export {
         out: String,
+        #[serde(default)]
+        bits: Option<String>,
     },
 }
 
@@ -196,7 +202,7 @@ impl Runner {
                 self.engine()?.mixer().set_master_db(*db);
             }
             Op::Record { input_wav } => {
-                let input = read_wav_mono(self.path(input_wav))?;
+                let input = render::read_wav_mono(self.path(input_wav))?;
                 self.record(&input)?;
             }
             Op::Play { seconds } => {
@@ -206,9 +212,14 @@ impl Runner {
             Op::Undo => self.engine()?.undo()?,
             Op::Redo => self.engine()?.redo()?,
             Op::Save => self.engine()?.save()?,
-            Op::Export { out } => {
+            Op::Bounce => self.engine()?.bounce()?,
+            Op::Export { out, bits } => {
+                let depth = bits
+                    .as_deref()
+                    .and_then(BitDepth::parse)
+                    .unwrap_or(BitDepth::Sixteen);
                 let path = self.path(out);
-                write_wav_stereo(&path, &self.captured.0, &self.captured.1)?;
+                render::write_wav(&path, &self.captured.0, &self.captured.1, depth)?;
                 self.captured.0.clear();
                 self.captured.1.clear();
             }
@@ -272,44 +283,4 @@ impl Runner {
         engine.stop();
         Ok(())
     }
-}
-
-pub fn read_wav_mono(path: impl AsRef<Path>) -> Result<Vec<f32>, ScriptError> {
-    let mut reader = hound::WavReader::open(path)?;
-    let spec = reader.spec();
-    let channels = spec.channels as usize;
-    let raw: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
-        hound::SampleFormat::Int => {
-            let scale = 1.0 / (1i64 << (spec.bits_per_sample - 1)) as f32;
-            reader
-                .samples::<i32>()
-                .map(|s| s.map(|v| v as f32 * scale))
-                .collect::<Result<_, _>>()?
-        }
-    };
-    Ok(raw
-        .chunks(channels)
-        .map(|f| f.iter().sum::<f32>() / channels as f32)
-        .collect())
-}
-
-pub fn write_wav_stereo(path: impl AsRef<Path>, l: &[f32], r: &[f32]) -> Result<(), ScriptError> {
-    if let Some(parent) = path.as_ref().parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let spec = hound::WavSpec {
-        channels: 2,
-        sample_rate: porta_engine::SAMPLE_RATE,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut w = hound::WavWriter::create(path, spec)?;
-    for i in 0..l.len().min(r.len()) {
-        for &s in &[l[i], r[i]] {
-            w.write_sample((s.clamp(-1.0, 1.0) * 32767.0).round() as i16)?;
-        }
-    }
-    w.finalize()?;
-    Ok(())
 }
