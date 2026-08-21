@@ -692,3 +692,20 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       first) - the property/handler wiring compiles clean and is
       correct by construction, but wants a real press to be sure.
       Full gate green across all four feature combinations.
+      Taskbar launcher + desktop icon, 2026-08-21, requested directly:
+      `deploy/openporta-launcher.desktop` (installed per-user at
+      ~/.local/share/applications/, same additive/no-sudo approach as
+      the autostart entry) pinned to the panel via one added
+      `launcher_NNNNNN=` line in ~/.config/wf-panel-pi.ini, plus
+      `deploy/openporta-desktop-icon.desktop` (a Type=Link entry in
+      ~/Desktop/, matching how this system's other app icons are
+      done). Launches windowed, not kiosk - a manual launcher wants to
+      still reach the rest of the desktop. Also drew a real cassette
+      icon (`deploy/openporta.svg` - two reels, tape path, label,
+      screws) rather than reusing a generic stock icon; needed
+      explicit width/height attributes alongside the viewBox, or it
+      rendered at an unclamped huge size on this system's icon loader.
+      Verified for real: both the taskbar's small rendering and the
+      full-size desktop icon show the cassette artwork correctly,
+      confirmed via grim's own geometry capture after sips's crop
+      flags turned out to be unreliable for this on macOS.
