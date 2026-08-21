@@ -306,12 +306,32 @@ Verification is `cargo test --workspace` plus the noted assertions.
       process's cwd happens to be, not the cassette directory - a
       quirk worth an absolute-by-default path in M5.4, not a
       correctness bug). Clean quit, no panics. Full gate green.
-- [ ] M5.4 Cassette new/load from within a running UI (needs the
-      Engine swapped at runtime, not just more buttons - see M5.3).
+- [x] M5.4 Cassette new/load from within a running UI. Turned out
+      smaller than M5.3's note suggested: Engine already lived behind
+      `Rc<RefCell<Engine>>`, shared with every handler and the timer,
+      so a swap is just `*engine.borrow_mut() = new_engine` - nothing
+      else needs rebuilding or rewiring. Added a path LineEdit + New/
+      Load buttons above the transport. New uses fixed defaults (15
+      min, cassette character, seed 0 - the CLI's --minutes/--seed/
+      --character flags have no UI equivalent, out of scope here);
+      Load is a plain `Engine::open`. Both refresh the export-path
+      default and status line on success, report the error on failure.
+      The `<dir>` CLI arg stays required at startup (no "no cassette
+      loaded" empty state) - deliberately, to avoid threading
+      `Option<Engine>` through every function for a v1 UI.
       Export path default fixed same day: now `<cassette-dir>/
       export.wav` via a new default_export_path helper (tested), not
-      whatever the process's cwd happened to be. New/load itself still
-      not done.
+      whatever the process's cwd happened to be.
+      2 new tests: create_default_cassette against a real tempdir, and
+      a direct test of the swap mechanism itself (replacing
+      *engine.borrow_mut() is visible through every other Rc::clone of
+      the same RefCell). Verified on the real window: played cassette
+      A to 00:01, typed cassette B's path, clicked Load - counter and
+      state correctly reset to B's own fresh 00:00/Stopped rather than
+      carrying over A's Playing state, status read "loaded
+      .../m54-b.porta". New produced a real cassette on disk and
+      "created .../m54-new-cassette.porta". Clean quit, no panics.
+      Full gate green.
 
 ## M6 - Raspberry Pi 4 deployment
 

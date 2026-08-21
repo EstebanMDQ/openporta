@@ -19,6 +19,7 @@
 
 slint::include_modules!();
 
+use porta_dsp::character::TapeCharacter;
 use porta_engine::command::{apply, Command};
 use porta_engine::engine::Engine;
 use porta_engine::NUM_TRACKS;
@@ -33,6 +34,11 @@ const TICK_SAMPLES: usize = (porta_engine::SAMPLE_RATE as usize * 20) / 1000;
 /// Meter window: -60dB reads as an empty bar, 0dB (or hotter) as full.
 /// A convention, not a spec requirement - matches common VU meters.
 const METER_FLOOR_DB: f32 = -60.0;
+
+/// New-cassette length from the UI's New button. The CLI's `new` has
+/// --minutes/--seed/--character flags with no UI equivalent yet; this
+/// is a fixed, reasonable default, not a re-implementation of those.
+const DEFAULT_MINUTES: f32 = 15.0;
 
 /// One track strip's arm/fader/pan handlers are identical apart from
 /// the track index and which generated callback they hook - a macro
@@ -83,8 +89,10 @@ pub fn run(dir: &str) -> Result<(), String> {
     // Default export path resolves against the cassette, not whatever
     // directory the process happened to be launched from.
     ui.set_export_path(default_export_path(dir).into());
+    ui.set_cassette_path(dir.into());
 
     connect_transport(&ui, &engine);
+    connect_cassette(&ui, &engine);
     wire_track!(
         ui,
         engine,
@@ -223,6 +231,51 @@ fn connect_transport(ui: &MainWindow, engine: &Rc<RefCell<Engine>>) {
     }
 }
 
+/// New/Load swap the engine a running UI is driving. `engine` is
+/// already `Rc<RefCell<Engine>>` shared with every other handler and
+/// the timer, so replacing what's inside the RefCell is all a swap
+/// needs - nothing else has to be rebuilt or rewired.
+fn connect_cassette(ui: &MainWindow, engine: &Rc<RefCell<Engine>>) {
+    {
+        let engine = Rc::clone(engine);
+        let ui_weak = ui.as_weak();
+        ui.on_new_pressed(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let path = ui.get_cassette_path().to_string();
+            match create_default_cassette(&path) {
+                Ok(new_engine) => {
+                    *engine.borrow_mut() = new_engine;
+                    ui.set_export_path(default_export_path(&path).into());
+                    ui.set_status_text(format!("created {path}").into());
+                }
+                Err(e) => ui.set_status_text(format!("new failed: {e}").into()),
+            }
+            refresh(&ui, &engine.borrow());
+        });
+    }
+    {
+        let engine = Rc::clone(engine);
+        let ui_weak = ui.as_weak();
+        ui.on_load_pressed(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let path = ui.get_cassette_path().to_string();
+            match Engine::open(&path) {
+                Ok(new_engine) => {
+                    *engine.borrow_mut() = new_engine;
+                    ui.set_export_path(default_export_path(&path).into());
+                    ui.set_status_text(format!("loaded {path}").into());
+                }
+                Err(e) => ui.set_status_text(format!("load failed: {e}").into()),
+            }
+            refresh(&ui, &engine.borrow());
+        });
+    }
+}
+
 fn refresh(ui: &MainWindow, engine: &Engine) {
     ui.set_transport_state(format!("{:?}", engine.state()).into());
     ui.set_counter_text(format_counter(engine.playhead()).into());
@@ -270,6 +323,13 @@ fn status_message(action: &str, result: Result<(), porta_engine::engine::EngineE
         Ok(()) => format!("{action}: ok"),
         Err(e) => format!("{action} failed: {e}"),
     }
+}
+
+/// Create a fresh cassette at `path` with the UI's fixed New-button
+/// defaults (15 minutes, cassette character, seed 0).
+fn create_default_cassette(path: &str) -> Result<Engine, String> {
+    let len = (porta_engine::SAMPLE_RATE as f32 * 60.0 * DEFAULT_MINUTES) as usize;
+    Engine::create_with_character(path, len, TapeCharacter::new(0)).map_err(|e| e.to_string())
 }
 
 /// A sensible default export target: next to the cassette, not
@@ -373,5 +433,31 @@ mod tests {
         assert_eq!(reader.spec().channels, 2);
         assert_eq!(reader.spec().sample_rate, porta_engine::SAMPLE_RATE);
         assert_eq!(reader.duration(), 4_800);
+    }
+
+    #[test]
+    fn create_default_cassette_makes_a_15_minute_tape() {
+        let dir = TempDir::new("new-cassette");
+        let engine = create_default_cassette(dir.0.to_str().unwrap()).unwrap();
+        let expected = (porta_engine::SAMPLE_RATE as f32 * 60.0 * 15.0) as usize;
+        assert_eq!(engine.manifest().len_samples, expected);
+        assert!(dir.0.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn swapping_the_shared_engine_is_visible_to_every_handle() {
+        // The actual mechanism connect_cassette relies on: replacing
+        // *engine.borrow_mut() must be visible through every other
+        // Rc::clone of the same RefCell, exactly like the timer and
+        // every button handler hold.
+        let dir_a = TempDir::new("swap-a");
+        let dir_b = TempDir::new("swap-b");
+        let engine = Rc::new(RefCell::new(Engine::create(&dir_a.0, 4_800, 1).unwrap()));
+        let other_handle = Rc::clone(&engine);
+
+        let replacement = Engine::create(&dir_b.0, 9_600, 2).unwrap();
+        *engine.borrow_mut() = replacement;
+
+        assert_eq!(other_handle.borrow().manifest().len_samples, 9_600);
     }
 }

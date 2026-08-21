@@ -85,7 +85,7 @@ component TrackStrip inherits Rectangle {
 export component MainWindow inherits Window {
     title: "openporta";
     width: 560px;
-    height: 460px;
+    height: 500px;
 
     callback play-pressed();
     callback stop-pressed();
@@ -94,6 +94,8 @@ export component MainWindow inherits Window {
     callback save-pressed();
     callback undo-pressed();
     callback export-pressed();
+    callback new-pressed();
+    callback load-pressed();
 
     in property <string> transport-state: "Stopped";
     in property <string> counter-text: "00:00";
@@ -102,6 +104,9 @@ export component MainWindow inherits Window {
     in property <float> master-meter-r-fraction: 0;
     in property <bool> can-undo: false;
     in property <string> status-text: "";
+    // The currently open cassette's directory - also where New/Load
+    // read the path to act on when their buttons are pressed.
+    in-out property <string> cassette-path: "";
     // Punch-in/out has no dedicated UI of its own (REQ-306's crossfade
     // is baked into the engine, transport.rs): arm a track, hit Record
     // while Playing to punch in; Play again punches out and keeps
@@ -146,6 +151,15 @@ export component MainWindow inherits Window {
     VerticalLayout {
         padding: 16px;
         spacing: 12px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            LineEdit {
+                text <=> cassette-path;
+            }
+            Button { text: "New"; clicked => { new-pressed(); } }
+            Button { text: "Load"; clicked => { load-pressed(); } }
+        }
 
         Text {
             text: counter-text;
