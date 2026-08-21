@@ -4,6 +4,8 @@
 mod realtime;
 mod render;
 mod script;
+#[cfg(feature = "ui")]
+mod ui;
 
 use porta_dsp::character::TapeCharacter;
 use porta_engine::engine::Engine;
@@ -35,7 +37,10 @@ channels carry something other than a per-track send - e.g. --in-offset
 2 on a Zoom L6, whose channels 1-2 are its own main mix. Don't guess
 the offset: run `probe` first, play into one input at a time, and read
 off which channel index actually lights up - interfaces don't always
-order their channels the way you'd expect.";
+order their channels the way you'd expect.
+
+built with --features ui:
+  porta-app ui <dir>";
 
 /// Minimal flag parsing: `--name value`. Returns the value if present.
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -125,6 +130,12 @@ fn cmd_devices() -> Result<(), String> {
 #[cfg(feature = "realtime")]
 fn cmd_probe(args: &[String]) -> Result<(), String> {
     realtime::probe_input(flag(args, "--in")).map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "ui")]
+fn cmd_ui(args: &[String]) -> Result<(), String> {
+    let dir = args.first().ok_or("ui needs a project directory")?;
+    ui::run(dir)
 }
 
 /// "1R - 2 - 3 - 4R" style summary of which tracks are record-armed.
@@ -255,6 +266,12 @@ fn main() -> ExitCode {
         #[cfg(not(feature = "realtime"))]
         Some(c @ ("devices" | "probe" | "live")) => Err(format!(
             "{c} needs the realtime feature: cargo run -p porta-app --features realtime -- {c}"
+        )),
+        #[cfg(feature = "ui")]
+        Some("ui") => cmd_ui(&args[1..]),
+        #[cfg(not(feature = "ui"))]
+        Some(c @ "ui") => Err(format!(
+            "{c} needs the ui feature: cargo run -p porta-app --features ui -- {c}"
         )),
         Some("--help") | Some("-h") | Some("help") | None => {
             println!("{USAGE}");

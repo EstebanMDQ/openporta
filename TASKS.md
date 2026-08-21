@@ -216,9 +216,28 @@ Verification is `cargo test --workspace` plus the noted assertions.
 
 ## M5 - Slint UI
 
-- [ ] M5.1 UI skeleton behind `ui` feature: transport + tape counter wired
+- [x] M5.1 UI skeleton behind `ui` feature: transport + tape counter wired
       to command queue only (verify: engine tests untouched, builds with
-      --features ui)
+      --features ui). Slint 1.17, `ui/main.slint` + `src/ui.rs`,
+      `porta-app ui <dir>`. No real audio yet - a repeating Slint timer
+      (20ms) stands in for the audio thread, feeding silence through
+      process_block so the transport and counter behave the way they
+      will once M5.2/M5.3 wire in the realtime adapter. Button handlers
+      and the timer only call porta_engine::command::apply and read
+      back state()/playhead() - never Engine's internal fields, per the
+      M5 gate ("UI drives the engine through the command queue only").
+      Verified two ways: `cargo test --workspace` (default, no ui
+      feature) untouched - 122 tests, all green; and manually, since
+      Slint has no documented headless-testing pattern for a downstream
+      app (its own test-driver crates test the compiler/language, not
+      this) - launched the real window, screenshotted it, clicked Play
+      via System Events/accessibility, watched the counter run
+      00:00 -> 01:00 and the state label flip to Stopped when the
+      1-minute test tape ran out, clicked Record with nothing armed
+      (correctly a no-op, arming is M5.2), quit clean, no panics. Same
+      manual-verification split as M4's hardware checklist: pure logic
+      (format_counter) gets an automated test, window/wiring behavior
+      gets watched directly.
 - [ ] M5.2 Track strips (fader/pan/arm) + master + meters
 - [ ] M5.3 Cassette new/load/save, undo button, export dialog, punch UX
 

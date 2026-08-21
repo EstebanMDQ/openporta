@@ -1,0 +1,41 @@
+// M5.1 skeleton: transport + tape counter only. Track strips (fader,
+// pan, arm) arrive in M5.2; undo/save/export UI in M5.3.
+
+import { Button } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    title: "openporta";
+    width: 320px;
+    height: 180px;
+
+    callback play-pressed();
+    callback stop-pressed();
+    callback record-pressed();
+
+    in property <string> transport-state: "Stopped";
+    in property <string> counter-text: "00:00";
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 14px;
+        alignment: center;
+
+        Text {
+            text: counter-text;
+            font-size: 36px;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: transport-state;
+            horizontal-alignment: center;
+            color: gray;
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: center;
+            Button { text: "Play"; clicked => { play-pressed(); } }
+            Button { text: "Stop"; clicked => { stop-pressed(); } }
+            Button { text: "Record"; clicked => { record-pressed(); } }
+        }
+    }
+}
