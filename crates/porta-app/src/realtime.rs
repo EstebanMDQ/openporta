@@ -48,6 +48,8 @@ pub enum RealtimeError {
     NoInputDevice,
     #[error("device '{0}' does not support 48kHz")]
     UnsupportedRate(String),
+    #[error("device '{0}' not found - check `devices` for the exact name")]
+    DeviceNotFound(String),
     #[error(transparent)]
     Cpal(#[from] cpal::Error),
     #[error("audio thread did not hand the engine back in time")]
@@ -250,9 +252,10 @@ pub fn list_devices() -> Result<Vec<String>, RealtimeError> {
 /// moves, instead of a slow record/render round trip per guess.
 pub fn probe_input(input_name: Option<&str>) -> Result<(), RealtimeError> {
     let host = cpal::default_host();
-    let device = pick(host.input_devices()?, input_name)
-        .or_else(|| host.default_input_device())
-        .ok_or(RealtimeError::NoInputDevice)?;
+    let device = pick_named_or_default(host.input_devices()?, input_name, || {
+        host.default_input_device()
+    })?
+    .ok_or(RealtimeError::NoInputDevice)?;
     let name = device.to_string();
     let channels = max_input_channels(&device)?;
     let config = StreamConfig {
@@ -319,6 +322,27 @@ fn pick(devices: impl Iterator<Item = cpal::Device>, wanted: Option<&str>) -> Op
     devices
         .into_iter()
         .find(|d| d.to_string().to_lowercase().contains(&want))
+}
+
+/// `Some(name)` must match a real device, or it's a clear error -
+/// silently substituting cpal's own "default" device for an explicitly
+/// named one that doesn't exist is exactly the kind of bug that reads
+/// as "it looks connected but nothing's actually being captured" (found
+/// 2026-08-21: the L6 got unplugged mid-session, and --in/--out kept
+/// "succeeding" against a useless two-channel default instead of
+/// erroring). `None` still falls back to the host's own default, same
+/// as always - that part of the contract is unchanged.
+fn pick_named_or_default(
+    devices: impl Iterator<Item = cpal::Device>,
+    wanted: Option<&str>,
+    default: impl FnOnce() -> Option<cpal::Device>,
+) -> Result<Option<cpal::Device>, RealtimeError> {
+    match wanted {
+        None => Ok(default()),
+        Some(name) => pick(devices, Some(name))
+            .map(Some)
+            .ok_or_else(|| RealtimeError::DeviceNotFound(name.to_string())),
+    }
 }
 
 /// The input device `input_name` (or the system default, if `None`)
@@ -466,9 +490,10 @@ fn negotiate(
     channel_offset: usize,
 ) -> Result<Negotiated, RealtimeError> {
     let host = cpal::default_host();
-    let output = pick(host.output_devices()?, output_name)
-        .or_else(|| host.default_output_device())
-        .ok_or(RealtimeError::NoOutputDevice)?;
+    let output = pick_named_or_default(host.output_devices()?, output_name, || {
+        host.default_output_device()
+    })?
+    .ok_or(RealtimeError::NoOutputDevice)?;
     let supported = supports_48k(&output)?;
     let out_channels = supported.channels() as usize;
     let output_device = output.to_string();
@@ -501,8 +526,9 @@ fn negotiate(
     // device channel starting at channel_offset. Tracks beyond however
     // many channels the device actually has get no ring at all and
     // record silence rather than a duplicate of another track's input.
-    let input_device =
-        pick(host.input_devices()?, input_name).or_else(|| host.default_input_device());
+    let input_device = pick_named_or_default(host.input_devices()?, input_name, || {
+        host.default_input_device()
+    })?;
     let (input_stream, input_name_used, track_capture_rx) = match input_device {
         None => (None, None, Vec::new()),
         Some(device) => {
