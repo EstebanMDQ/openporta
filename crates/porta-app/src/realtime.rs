@@ -245,6 +245,24 @@ pub fn list_devices() -> Result<Vec<String>, RealtimeError> {
     Ok(out)
 }
 
+/// Just the display names, deduplicated, for a device-picker dropdown -
+/// `list_devices` above is the CLI's `devices` command, printing every
+/// supported config a human reads once while probing; a UI picker just
+/// needs names to choose from. Skips devices that don't even answer
+/// their own name query rather than surfacing an error - a picker
+/// should degrade to "fewer options" here, not fail to open at all.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
+pub fn list_device_names() -> Result<(Vec<String>, Vec<String>), RealtimeError> {
+    let host = cpal::default_host();
+    let mut outputs: Vec<String> = host.output_devices()?.map(|d| d.to_string()).collect();
+    let mut inputs: Vec<String> = host.input_devices()?.map(|d| d.to_string()).collect();
+    outputs.sort();
+    outputs.dedup();
+    inputs.sort();
+    inputs.dedup();
+    Ok((outputs, inputs))
+}
+
 /// Print a live peak-level meter per input channel until the user hits
 /// enter. For working out which physical jack lands on which channel
 /// index on interfaces that don't order them the way you'd guess (the

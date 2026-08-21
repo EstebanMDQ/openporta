@@ -1,16 +1,29 @@
 // M5.1: transport + tape counter. M5.2: track strips (arm/fader/pan) +
 // master + meters. Undo/save/export UI arrives in M5.3.
 
-import { Button, Slider, LineEdit, ScrollView } from "std-widgets.slint";
+import { Button, Slider, LineEdit, ComboBox, ScrollView, Palette } from "std-widgets.slint";
+
+// Every button here is meant to be pressed by a finger on a small
+// touchscreen (the Pi kiosk display), not just clicked with a mouse -
+// std-widgets' default Button is sized for the latter. min-height/
+// font-size are the only overrides; everything else (text, clicked,
+// enabled) still comes straight from Button.
+component TactileButton inherits Button {
+    min-height: 46px;
+    min-width: 46px;
+}
 
 // A vertical meter bar: a fixed-height track with a bottom-anchored
 // fill. `level-fraction` is pre-clamped to 0..1 in Rust - no math here.
+// Deliberately not theme-linked: a VU meter's own housing reads as
+// dark hardware regardless of room lighting, same as the real thing -
+// only the window chrome around it should follow light/dark.
 component MeterBar inherits Rectangle {
     in property <float> level-fraction: 0;
-    width: 14px;
-    height: 44px;
+    width: 20px;
+    height: 140px;
     background: #222;
-    border-radius: 2px;
+    border-radius: 3px;
 
     Rectangle {
         x: 0;
@@ -18,7 +31,7 @@ component MeterBar inherits Rectangle {
         width: parent.width;
         height: parent.height * level-fraction;
         background: level-fraction > 0.85 ? #e05252 : #4caf6d;
-        border-radius: 2px;
+        border-radius: 3px;
     }
 }
 
@@ -33,44 +46,50 @@ component TrackStrip inherits Rectangle {
     callback fader-changed(float);
     callback pan-changed(float);
 
-    width: 80px;
-    background: #1b1b1b;
+    width: 104px;
+    background: Palette.alternate-background;
     border-radius: 6px;
 
     VerticalLayout {
-        padding: 5px;
-        spacing: 3px;
+        padding: 6px;
+        spacing: 4px;
         alignment: start;
 
         Text {
             text: "Track " + track-label;
             horizontal-alignment: center;
-            font-size: 11px;
+            font-size: 12px;
+            color: Palette.foreground;
         }
-        Button {
+        TactileButton {
             text: armed ? "ARMED" : "arm";
             clicked => { arm-pressed(); }
         }
+        // Meter and fader side by side, like a real channel strip -
+        // the fader's own travel tells you the gain at a glance
+        // instead of a separate small horizontal slider underneath.
         HorizontalLayout {
             alignment: center;
+            spacing: 6px;
             MeterBar { level-fraction: meter-fraction; }
-        }
-        Text {
-            text: "fader";
-            horizontal-alignment: center;
-            font-size: 8px;
-            color: gray;
-        }
-        Slider {
-            minimum: -60;
-            maximum: 6;
-            value: fader-db;
-            changed(v) => { fader-changed(v); }
+            Slider {
+                orientation: vertical;
+                height: 140px;
+                // Unity (0dB) sits at 3/4 of the travel up from the
+                // bottom, not dead center or at the top: (0 - -36) /
+                // (12 - -36) = 0.75. Below unity is all cut, down to
+                // -36dB (effectively silent); above is up to +12dB of
+                // real gain for a hot but usably weak input signal.
+                minimum: -36;
+                maximum: 12;
+                value: fader-db;
+                changed(v) => { fader-changed(v); }
+            }
         }
         Text {
             text: "pan";
             horizontal-alignment: center;
-            font-size: 8px;
+            font-size: 9px;
             color: gray;
         }
         Slider {
@@ -88,12 +107,11 @@ export component MainWindow inherits Window {
     // and maximize it - a plain width/height binding pins the window to
     // a fixed size and maximize becomes a no-op. min-* keeps a maximized
     // or shrunk window from squeezing the track strips unreadably thin.
-    // preferred-height targets the Pi kiosk display (800x480 native,
-    // confirmed on-device via wlr-randr) rather than a desktop-sized
-    // window; the ScrollView below covers anything still too tall to
-    // fit, on that screen or a smaller one.
-    preferred-width: 560px;
-    preferred-height: 460px;
+    // preferred-height matches the Pi kiosk display's own 800x480
+    // (confirmed on-device via wlr-randr); the ScrollView below covers
+    // anything still too tall to fit, on that screen or a smaller one.
+    preferred-width: 620px;
+    preferred-height: 480px;
     min-width: 480px;
     min-height: 280px;
     // Driven by `--kiosk` on the CLI (default false, so a plain
@@ -107,6 +125,7 @@ export component MainWindow inherits Window {
     in-out property <bool> kiosk-mode: false;
     full-screen: kiosk-mode;
     no-frame: kiosk-mode;
+    background: Palette.background;
 
     callback play-pressed();
     callback stop-pressed();
@@ -124,6 +143,9 @@ export component MainWindow inherits Window {
     callback load-pressed();
     callback connect-pressed();
     callback disconnect-pressed();
+    // Re-scans available devices - called when Settings opens, so a
+    // device plugged in after launch still shows up without a restart.
+    callback refresh-devices-pressed();
 
     in property <string> transport-state: "Stopped";
     in property <string> counter-text: "00:00";
@@ -135,16 +157,19 @@ export component MainWindow inherits Window {
     // The currently open cassette's directory - also where New/Load
     // read the path to act on when their buttons are pressed.
     in-out property <string> cassette-path: "";
-    // Audio connection settings: blank device names mean "system
-    // default", matching --in/--out on the live CLI. Read by Connect
-    // when pressed, not applied live - changing a setting while
-    // connected needs a fresh Connect (which disconnects first).
-    in-out property <string> input-device-text: "";
-    in-out property <string> output-device-text: "";
+    // Real device names from cpal, "(default)" standing in for "leave
+    // this blank" - a free-text field let a typo'd or unplugged device
+    // name "succeed" silently against a useless fallback (found
+    // 2026-08-21); a dropdown of what's actually there can't do that.
+    in property <[string]> input-device-names: ["(default)"];
+    in property <[string]> output-device-names: ["(default)"];
+    in-out property <string> input-device-text: "(default)";
+    in-out property <string> output-device-text: "(default)";
     in-out property <string> period-text: "256";
     in-out property <string> channel-offset-text: "0";
     in property <bool> connected: false;
     in property <string> connection-status: "not connected - silent, no real audio";
+    in-out property <bool> show-settings: false;
     // Punch-in/out has no dedicated UI of its own (REQ-306's crossfade
     // is baked into the engine, transport.rs): arm a track, hit Record
     // while Playing to punch in; Play again punches out and keeps
@@ -202,46 +227,58 @@ export component MainWindow inherits Window {
         }
         init => { self.focus(); }
 
-        // Scrollable so the full layout stays reachable on a short
-        // window (an 800x480 kiosk display, or this window shrunk/
-        // maximized to something the content doesn't natively fit)
-        // instead of clipping silently off the bottom edge.
         ScrollView {
+            visible: show-settings;
             width: 100%;
             height: 100%;
 
             VerticalLayout {
-                padding: 8px;
-                spacing: 6px;
+                padding: 12px;
+                spacing: 10px;
 
-                HorizontalLayout {
-                    spacing: 8px;
-                    LineEdit {
-                        text <=> cassette-path;
-                    }
-                    Button { text: "New"; clicked => { new-pressed(); } }
-                    Button { text: "Load"; clicked => { load-pressed(); } }
+                Text {
+                    text: "Settings";
+                    font-size: 18px;
+                    color: Palette.foreground;
+                }
+
+                Text {
+                    text: "Input device";
+                    font-size: 11px;
+                    color: gray;
+                }
+                ComboBox {
+                    model: input-device-names;
+                    current-value <=> input-device-text;
+                }
+
+                Text {
+                    text: "Output device";
+                    font-size: 11px;
+                    color: gray;
+                }
+                ComboBox {
+                    model: output-device-names;
+                    current-value <=> output-device-text;
                 }
 
                 HorizontalLayout {
-                    spacing: 6px;
-                    LineEdit {
-                        placeholder-text: "input (blank = default)";
-                        text <=> input-device-text;
+                    spacing: 10px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text { text: "Period (frames)"; font-size: 11px; color: gray; }
+                        LineEdit { text <=> period-text; }
                     }
-                    LineEdit {
-                        placeholder-text: "output (blank = default)";
-                        text <=> output-device-text;
+                    VerticalLayout {
+                        spacing: 4px;
+                        Text { text: "Input channel offset"; font-size: 11px; color: gray; }
+                        LineEdit { text <=> channel-offset-text; }
                     }
-                    LineEdit {
-                        width: 60px;
-                        text <=> period-text;
-                    }
-                    LineEdit {
-                        width: 60px;
-                        text <=> channel-offset-text;
-                    }
-                    Button {
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    TactileButton {
                         text: connected ? "Disconnect" : "Connect";
                         clicked => {
                             if (connected) {
@@ -251,12 +288,50 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
+                    TactileButton {
+                        text: "Refresh devices";
+                        clicked => { refresh-devices-pressed(); }
+                    }
+                    TactileButton {
+                        text: "Back";
+                        clicked => { show-settings = false; }
+                    }
                 }
                 Text {
                     text: connection-status;
-                    horizontal-alignment: center;
-                    font-size: 9px;
+                    font-size: 11px;
                     color: gray;
+                }
+            }
+        }
+
+        // Scrollable so the full layout stays reachable on a short
+        // window (an 800x480 kiosk display, or this window shrunk/
+        // maximized to something the content doesn't natively fit)
+        // instead of clipping silently off the bottom edge.
+        ScrollView {
+            visible: !show-settings;
+            width: 100%;
+            height: 100%;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> cassette-path;
+                    }
+                    TactileButton { text: "New"; clicked => { new-pressed(); } }
+                    TactileButton { text: "Load"; clicked => { load-pressed(); } }
+                    TactileButton {
+                        text: "⚙";
+                        clicked => {
+                            show-settings = true;
+                            refresh-devices-pressed();
+                        }
+                    }
                 }
 
                 HorizontalLayout {
@@ -264,7 +339,8 @@ export component MainWindow inherits Window {
                     spacing: 10px;
                     Text {
                         text: counter-text;
-                        font-size: 20px;
+                        font-size: 22px;
+                        color: Palette.foreground;
                         vertical-alignment: center;
                     }
                     Text {
@@ -277,13 +353,13 @@ export component MainWindow inherits Window {
                 HorizontalLayout {
                     spacing: 6px;
                     alignment: center;
-                    Button { text: "|<"; clicked => { seek-start-pressed(); } }
-                    Button { text: "<<"; clicked => { rewind-pressed(); } }
-                    Button { text: "Play"; clicked => { play-pressed(); } }
-                    Button { text: "Stop"; clicked => { stop-pressed(); } }
-                    Button { text: "Record"; clicked => { record-pressed(); } }
-                    Button { text: ">>"; clicked => { fast-forward-pressed(); } }
-                    Button { text: ">|"; clicked => { seek-end-pressed(); } }
+                    TactileButton { text: "|<"; clicked => { seek-start-pressed(); } }
+                    TactileButton { text: "<<"; clicked => { rewind-pressed(); } }
+                    TactileButton { text: "Play"; clicked => { play-pressed(); } }
+                    TactileButton { text: "Stop"; clicked => { stop-pressed(); } }
+                    TactileButton { text: "Record"; clicked => { record-pressed(); } }
+                    TactileButton { text: ">>"; clicked => { fast-forward-pressed(); } }
+                    TactileButton { text: ">|"; clicked => { seek-end-pressed(); } }
                 }
 
                 HorizontalLayout {
@@ -296,37 +372,34 @@ export component MainWindow inherits Window {
                     track4 := TrackStrip { track-label: "4"; }
 
                     Rectangle {
-                        width: 80px;
-                        background: #1b1b1b;
+                        width: 104px;
+                        background: Palette.alternate-background;
                         border-radius: 6px;
 
                         VerticalLayout {
-                            padding: 5px;
-                            spacing: 3px;
+                            padding: 6px;
+                            spacing: 4px;
                             alignment: start;
 
                             Text {
                                 text: "Master";
                                 horizontal-alignment: center;
-                                font-size: 11px;
+                                font-size: 12px;
+                                color: Palette.foreground;
                             }
                             HorizontalLayout {
-                                spacing: 4px;
                                 alignment: center;
+                                spacing: 6px;
                                 MeterBar { level-fraction: master-meter-l-fraction; }
                                 MeterBar { level-fraction: master-meter-r-fraction; }
-                            }
-                            Text {
-                                text: "master";
-                                horizontal-alignment: center;
-                                font-size: 8px;
-                                color: gray;
-                            }
-                            Slider {
-                                minimum: -60;
-                                maximum: 6;
-                                value: master-fader-db;
-                                changed(v) => { master-fader-changed(v); }
+                                Slider {
+                                    orientation: vertical;
+                                    height: 140px;
+                                    minimum: -36;
+                                    maximum: 12;
+                                    value: master-fader-db;
+                                    changed(v) => { master-fader-changed(v); }
+                                }
                             }
                         }
                     }
@@ -335,8 +408,8 @@ export component MainWindow inherits Window {
                 HorizontalLayout {
                     spacing: 10px;
                     alignment: center;
-                    Button { text: "Save"; clicked => { save-pressed(); } }
-                    Button {
+                    TactileButton { text: "Save"; clicked => { save-pressed(); } }
+                    TactileButton {
                         text: "Undo";
                         enabled: can-undo;
                         clicked => { undo-pressed(); }
@@ -345,8 +418,8 @@ export component MainWindow inherits Window {
                         width: 140px;
                         text <=> export-path;
                     }
-                    Button { text: "Export WAV"; clicked => { export-pressed(); } }
-                    Button { text: "Export MP3"; clicked => { export-mp3-pressed(); } }
+                    TactileButton { text: "Export WAV"; clicked => { export-pressed(); } }
+                    TactileButton { text: "Export MP3"; clicked => { export-mp3-pressed(); } }
                 }
                 Text {
                     text: status-text;

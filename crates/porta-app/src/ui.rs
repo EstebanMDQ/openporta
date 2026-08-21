@@ -375,13 +375,14 @@ fn disconnect(slot: &mut Option<Backend>, cassette_path: &str) -> String {
     }
 }
 
-/// Blank means "system default" - matches --in/--out on `live`. Kept
+/// Blank (or the device dropdown's own "(default)" placeholder entry)
+/// means "system default" - matches --in/--out on `live`. Kept
 /// unconditional (only `connect`, realtime-only, calls it) so its unit
 /// test always runs regardless of feature flags.
 #[cfg_attr(not(feature = "realtime"), allow(dead_code))]
 fn non_empty(s: &str) -> Option<String> {
     let s = s.trim();
-    if s.is_empty() {
+    if s.is_empty() || s == "(default)" {
         None
     } else {
         Some(s.to_string())
@@ -442,7 +443,10 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
     ui.set_export_path(default_export_path(dir).into());
     ui.set_cassette_path(dir.into());
     #[cfg(feature = "realtime")]
-    prefill_remembered_audio_settings(&ui);
+    {
+        refresh_device_lists(&ui);
+        prefill_remembered_audio_settings(&ui);
+    }
 
     connect_transport(&ui, &backend);
     connect_cassette(&ui, &backend);
@@ -758,11 +762,44 @@ fn prefill_remembered_audio_settings(ui: &MainWindow) {
     ui.set_channel_offset_text(remembered.input_channel_offset.to_string().into());
 }
 
+/// (Re)scans available devices into the Settings view's two dropdowns -
+/// called once at startup and again every time Settings opens, so a
+/// device plugged in after launch shows up without restarting the app.
+/// A scan failure just leaves the dropdowns as they were rather than
+/// clearing them out from under whatever was already selected.
+#[cfg(feature = "realtime")]
+fn refresh_device_lists(ui: &MainWindow) {
+    let Ok((mut outputs, mut inputs)) = crate::realtime::list_device_names() else {
+        return;
+    };
+    outputs.insert(0, "(default)".to_string());
+    inputs.insert(0, "(default)".to_string());
+    let to_model = |names: Vec<String>| {
+        slint::ModelRc::new(slint::VecModel::from(
+            names
+                .into_iter()
+                .map(slint::SharedString::from)
+                .collect::<Vec<_>>(),
+        ))
+    };
+    ui.set_output_device_names(to_model(outputs));
+    ui.set_input_device_names(to_model(inputs));
+}
+
 /// Connect/Disconnect always exist so a `ui`-only build (no
 /// `realtime`) has a discoverable, non-broken button rather than a
 /// silently dead one - it just explains why nothing happens.
 #[cfg_attr(not(feature = "realtime"), allow(unused_variables))]
 fn connect_audio(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
+    #[cfg(feature = "realtime")]
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_refresh_devices_pressed(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh_device_lists(&ui);
+            }
+        });
+    }
     #[cfg(feature = "realtime")]
     {
         let backend = Rc::clone(backend);
@@ -1018,6 +1055,7 @@ mod tests {
     fn non_empty_blank_means_default() {
         assert_eq!(non_empty(""), None);
         assert_eq!(non_empty("   "), None);
+        assert_eq!(non_empty("(default)"), None);
         assert_eq!(non_empty(" ZOOM L6 "), Some("ZOOM L6".to_string()));
     }
 
