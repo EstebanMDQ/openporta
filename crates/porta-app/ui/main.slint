@@ -100,7 +100,11 @@ export component MainWindow inherits Window {
     // desktop launch stays a normal resizable/movable window). Both
     // are built-in Window properties - full-screen also respects the
     // SLINT_FULLSCREEN env var on its own, no-frame is winit-only.
-    in property <bool> kiosk-mode: false;
+    // in-out (not in) so the Escape handler below can also flip it -
+    // kiosk mode removes every bit of window chrome, so without an
+    // escape hatch there would be no way to get back to the desktop
+    // short of killing the process over ssh.
+    in-out property <bool> kiosk-mode: false;
     full-screen: kiosk-mode;
     no-frame: kiosk-mode;
 
@@ -182,157 +186,174 @@ export component MainWindow inherits Window {
     callback track4-fader-changed <=> track4.fader-changed;
     callback track4-pan-changed <=> track4.pan-changed;
 
-    // Scrollable so the full layout stays reachable on a short window
-    // (an 800x480 kiosk display, or this window shrunk/maximized to
-    // something the content doesn't natively fit) instead of clipping
-    // silently off the bottom edge.
-    ScrollView {
-        width: 100%;
-        height: 100%;
-
-        VerticalLayout {
-            padding: 8px;
-            spacing: 6px;
-
-            HorizontalLayout {
-                spacing: 8px;
-                LineEdit {
-                    text <=> cassette-path;
-                }
-                Button { text: "New"; clicked => { new-pressed(); } }
-                Button { text: "Load"; clicked => { load-pressed(); } }
+    // Escape leaves kiosk mode (window chrome and normal size come
+    // back) - the only way out of it besides killing the process over
+    // ssh, since --kiosk otherwise removes every bit of window chrome
+    // a mouse could use to do that. init grabs focus immediately so
+    // the very first keypress works, not just after a click.
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape && kiosk-mode) {
+                kiosk-mode = false;
+                accept
+            } else {
+                reject
             }
+        }
+        init => { self.focus(); }
 
-            HorizontalLayout {
+        // Scrollable so the full layout stays reachable on a short
+        // window (an 800x480 kiosk display, or this window shrunk/
+        // maximized to something the content doesn't natively fit)
+        // instead of clipping silently off the bottom edge.
+        ScrollView {
+            width: 100%;
+            height: 100%;
+
+            VerticalLayout {
+                padding: 8px;
                 spacing: 6px;
-                LineEdit {
-                    placeholder-text: "input (blank = default)";
-                    text <=> input-device-text;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> cassette-path;
+                    }
+                    Button { text: "New"; clicked => { new-pressed(); } }
+                    Button { text: "Load"; clicked => { load-pressed(); } }
                 }
-                LineEdit {
-                    placeholder-text: "output (blank = default)";
-                    text <=> output-device-text;
-                }
-                LineEdit {
-                    width: 60px;
-                    text <=> period-text;
-                }
-                LineEdit {
-                    width: 60px;
-                    text <=> channel-offset-text;
-                }
-                Button {
-                    text: connected ? "Disconnect" : "Connect";
-                    clicked => {
-                        if (connected) {
-                            disconnect-pressed();
-                        } else {
-                            connect-pressed();
+
+                HorizontalLayout {
+                    spacing: 6px;
+                    LineEdit {
+                        placeholder-text: "input (blank = default)";
+                        text <=> input-device-text;
+                    }
+                    LineEdit {
+                        placeholder-text: "output (blank = default)";
+                        text <=> output-device-text;
+                    }
+                    LineEdit {
+                        width: 60px;
+                        text <=> period-text;
+                    }
+                    LineEdit {
+                        width: 60px;
+                        text <=> channel-offset-text;
+                    }
+                    Button {
+                        text: connected ? "Disconnect" : "Connect";
+                        clicked => {
+                            if (connected) {
+                                disconnect-pressed();
+                            } else {
+                                connect-pressed();
+                            }
                         }
                     }
                 }
-            }
-            Text {
-                text: connection-status;
-                horizontal-alignment: center;
-                font-size: 9px;
-                color: gray;
-            }
-
-            HorizontalLayout {
-                alignment: center;
-                spacing: 10px;
                 Text {
-                    text: counter-text;
-                    font-size: 20px;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: transport-state;
-                    font-size: 13px;
+                    text: connection-status;
+                    horizontal-alignment: center;
+                    font-size: 9px;
                     color: gray;
-                    vertical-alignment: center;
                 }
-            }
-            HorizontalLayout {
-                spacing: 6px;
-                alignment: center;
-                Button { text: "|<"; clicked => { seek-start-pressed(); } }
-                Button { text: "<<"; clicked => { rewind-pressed(); } }
-                Button { text: "Play"; clicked => { play-pressed(); } }
-                Button { text: "Stop"; clicked => { stop-pressed(); } }
-                Button { text: "Record"; clicked => { record-pressed(); } }
-                Button { text: ">>"; clicked => { fast-forward-pressed(); } }
-                Button { text: ">|"; clicked => { seek-end-pressed(); } }
-            }
 
-            HorizontalLayout {
-                spacing: 10px;
-                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 10px;
+                    Text {
+                        text: counter-text;
+                        font-size: 20px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: transport-state;
+                        font-size: 13px;
+                        color: gray;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    alignment: center;
+                    Button { text: "|<"; clicked => { seek-start-pressed(); } }
+                    Button { text: "<<"; clicked => { rewind-pressed(); } }
+                    Button { text: "Play"; clicked => { play-pressed(); } }
+                    Button { text: "Stop"; clicked => { stop-pressed(); } }
+                    Button { text: "Record"; clicked => { record-pressed(); } }
+                    Button { text: ">>"; clicked => { fast-forward-pressed(); } }
+                    Button { text: ">|"; clicked => { seek-end-pressed(); } }
+                }
 
-                track1 := TrackStrip { track-label: "1"; }
-                track2 := TrackStrip { track-label: "2"; }
-                track3 := TrackStrip { track-label: "3"; }
-                track4 := TrackStrip { track-label: "4"; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
 
-                Rectangle {
-                    width: 80px;
-                    background: #1b1b1b;
-                    border-radius: 6px;
+                    track1 := TrackStrip { track-label: "1"; }
+                    track2 := TrackStrip { track-label: "2"; }
+                    track3 := TrackStrip { track-label: "3"; }
+                    track4 := TrackStrip { track-label: "4"; }
 
-                    VerticalLayout {
-                        padding: 5px;
-                        spacing: 3px;
-                        alignment: start;
+                    Rectangle {
+                        width: 80px;
+                        background: #1b1b1b;
+                        border-radius: 6px;
 
-                        Text {
-                            text: "Master";
-                            horizontal-alignment: center;
-                            font-size: 11px;
-                        }
-                        HorizontalLayout {
-                            spacing: 4px;
-                            alignment: center;
-                            MeterBar { level-fraction: master-meter-l-fraction; }
-                            MeterBar { level-fraction: master-meter-r-fraction; }
-                        }
-                        Text {
-                            text: "master";
-                            horizontal-alignment: center;
-                            font-size: 8px;
-                            color: gray;
-                        }
-                        Slider {
-                            minimum: -60;
-                            maximum: 6;
-                            value: master-fader-db;
-                            changed(v) => { master-fader-changed(v); }
+                        VerticalLayout {
+                            padding: 5px;
+                            spacing: 3px;
+                            alignment: start;
+
+                            Text {
+                                text: "Master";
+                                horizontal-alignment: center;
+                                font-size: 11px;
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                alignment: center;
+                                MeterBar { level-fraction: master-meter-l-fraction; }
+                                MeterBar { level-fraction: master-meter-r-fraction; }
+                            }
+                            Text {
+                                text: "master";
+                                horizontal-alignment: center;
+                                font-size: 8px;
+                                color: gray;
+                            }
+                            Slider {
+                                minimum: -60;
+                                maximum: 6;
+                                value: master-fader-db;
+                                changed(v) => { master-fader-changed(v); }
+                            }
                         }
                     }
                 }
-            }
 
-            HorizontalLayout {
-                spacing: 10px;
-                alignment: center;
-                Button { text: "Save"; clicked => { save-pressed(); } }
-                Button {
-                    text: "Undo";
-                    enabled: can-undo;
-                    clicked => { undo-pressed(); }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: center;
+                    Button { text: "Save"; clicked => { save-pressed(); } }
+                    Button {
+                        text: "Undo";
+                        enabled: can-undo;
+                        clicked => { undo-pressed(); }
+                    }
+                    LineEdit {
+                        width: 140px;
+                        text <=> export-path;
+                    }
+                    Button { text: "Export WAV"; clicked => { export-pressed(); } }
+                    Button { text: "Export MP3"; clicked => { export-mp3-pressed(); } }
                 }
-                LineEdit {
-                    width: 140px;
-                    text <=> export-path;
+                Text {
+                    text: status-text;
+                    horizontal-alignment: center;
+                    font-size: 10px;
+                    color: gray;
                 }
-                Button { text: "Export WAV"; clicked => { export-pressed(); } }
-                Button { text: "Export MP3"; clicked => { export-mp3-pressed(); } }
-            }
-            Text {
-                text: status-text;
-                horizontal-alignment: center;
-                font-size: 10px;
-                color: gray;
             }
         }
     }
