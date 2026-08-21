@@ -270,7 +270,47 @@ Verification is `cargo test --workspace` plus the noted assertions.
       positions diverged from the untouched tracks. Clean quit, no
       panics. Full gate green, including cargo test -p porta-app
       --features ui.
-- [ ] M5.3 Cassette new/load/save, undo button, export dialog, punch UX
+- [x] M5.3 Save, undo button, export - partial, see M5.4. Save and Undo
+      are one Button each, wired directly to Engine::save/undo (real
+      Result, shown as a status line: "save: ok" / "undo failed:
+      nothing to undo" / etc via a small status_message helper).
+      Export is a LineEdit path field (defaults "export.wav", plain
+      text, not a native file-picker dialog - avoids a new dependency
+      for a v1 that's explicitly "an instrument, not a DAW") + a button
+      that reuses render::mixdown/write_wav verbatim, the same
+      functions the CLI's render/export commands already use - one
+      code path, not a second one that could drift (REQ-803's spirit).
+      Undo's a plain Button, not a menu/history list (REQ-505).
+      Punch UX needed no new UI at all: transport.rs already documents
+      punch-in as record() from Playing and punch-out as play() from
+      Recording (crossfade is REQ-306, already baked into the engine,
+      already tested in record.rs) - the same Play/Record/Stop buttons
+      from M5.1 already do this, noted in a .slint comment so it isn't
+      mistaken for a gap. (My first draft of that comment claimed Stop
+      punches out - wrong, checked transport.rs before committing to
+      it: Stop halts the transport too, Play is what punches out while
+      staying rolling.)
+      New/load a different cassette from within a running UI is NOT
+      done - deferred to M5.4, since it needs the running Engine
+      swapped out at runtime, a real structural change, not more
+      buttons. Today: quit, `porta-app new <dir>`, relaunch
+      `ui <dir>` - inconvenient but functional.
+      3 new tests (status_message, and export_wav against a real
+      tempdir + hound-read-back of the written WAV, not just "it
+      didn't error"). Verified on the real window: Save produced
+      "save: ok" and rewrote manifest.json; Undo on a fresh cassette
+      correctly produced "undo failed: nothing to undo"; Export wrote a
+      real, valid 2-minute stereo 48kHz WAV (verified with Python's
+      wave module) and reported "exported to export.wav". Found in the
+      process, not fixed (default relative path lands wherever the
+      process's cwd happens to be, not the cassette directory - a
+      quirk worth an absolute-by-default path in M5.4, not a
+      correctness bug). Clean quit, no panics. Full gate green.
+- [ ] M5.4 Cassette new/load from within a running UI (needs the
+      Engine swapped at runtime, not just more buttons - see M5.3).
+      Default export path should probably resolve relative to the
+      cassette directory, not the process's cwd (found during M5.3's
+      manual verification).
 
 ## M6 - Raspberry Pi 4 deployment
 

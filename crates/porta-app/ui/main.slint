@@ -1,7 +1,7 @@
 // M5.1: transport + tape counter. M5.2: track strips (arm/fader/pan) +
 // master + meters. Undo/save/export UI arrives in M5.3.
 
-import { Button, Slider } from "std-widgets.slint";
+import { Button, Slider, LineEdit } from "std-widgets.slint";
 
 // A vertical meter bar: a fixed-height track with a bottom-anchored
 // fill. `level-fraction` is pre-clamped to 0..1 in Rust - no math here.
@@ -85,18 +85,28 @@ component TrackStrip inherits Rectangle {
 export component MainWindow inherits Window {
     title: "openporta";
     width: 560px;
-    height: 400px;
+    height: 460px;
 
     callback play-pressed();
     callback stop-pressed();
     callback record-pressed();
     callback master-fader-changed(float);
+    callback save-pressed();
+    callback undo-pressed();
+    callback export-pressed();
 
     in property <string> transport-state: "Stopped";
     in property <string> counter-text: "00:00";
     in property <float> master-fader-db: 0;
     in property <float> master-meter-l-fraction: 0;
     in property <float> master-meter-r-fraction: 0;
+    in property <bool> can-undo: false;
+    in property <string> status-text: "";
+    // Punch-in/out has no dedicated UI of its own (REQ-306's crossfade
+    // is baked into the engine, transport.rs): arm a track, hit Record
+    // while Playing to punch in; Play again punches out and keeps
+    // rolling, Stop punches out and halts - the same buttons above.
+    in-out property <string> export-path: "export.wav";
 
     // Aliases so Rust can read/set each strip's state and connect its
     // callbacks from the root - the strips themselves are instantiated
@@ -199,6 +209,28 @@ export component MainWindow inherits Window {
                     }
                 }
             }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: center;
+            Button { text: "Save"; clicked => { save-pressed(); } }
+            Button {
+                text: "Undo";
+                enabled: can-undo;
+                clicked => { undo-pressed(); }
+            }
+            LineEdit {
+                width: 160px;
+                text <=> export-path;
+            }
+            Button { text: "Export WAV"; clicked => { export-pressed(); } }
+        }
+        Text {
+            text: status-text;
+            horizontal-alignment: center;
+            font-size: 11px;
+            color: gray;
         }
     }
 }

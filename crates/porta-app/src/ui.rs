@@ -125,6 +125,44 @@ pub fn run(dir: &str) -> Result<(), String> {
             }
         });
     }
+    {
+        let engine = Rc::clone(&engine);
+        let ui_weak = ui.as_weak();
+        ui.on_save_pressed(move || {
+            let mut e = engine.borrow_mut();
+            let status = status_message("save", e.save());
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_status_text(status.into());
+                refresh(&ui, &e);
+            }
+        });
+    }
+    {
+        let engine = Rc::clone(&engine);
+        let ui_weak = ui.as_weak();
+        ui.on_undo_pressed(move || {
+            let mut e = engine.borrow_mut();
+            let status = status_message("undo", e.undo());
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_status_text(status.into());
+                refresh(&ui, &e);
+            }
+        });
+    }
+    {
+        let engine = Rc::clone(&engine);
+        let ui_weak = ui.as_weak();
+        ui.on_export_pressed(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let path = ui.get_export_path().to_string();
+            let mut e = engine.borrow_mut();
+            let status = export_wav(&mut e, &path);
+            ui.set_status_text(status.into());
+            refresh(&ui, &e);
+        });
+    }
 
     let timer = slint::Timer::default();
     {
@@ -210,6 +248,8 @@ fn refresh(ui: &MainWindow, engine: &Engine) {
     let (ml, mr) = engine.master_level_db();
     ui.set_master_meter_l_fraction(meter_fraction(ml));
     ui.set_master_meter_r_fraction(meter_fraction(mr));
+
+    ui.set_can_undo(engine.can_undo());
 }
 
 fn format_counter(playhead_samples: usize) -> String {
@@ -220,6 +260,26 @@ fn format_counter(playhead_samples: usize) -> String {
 /// Maps a dBFS reading onto the 0..1 the meter bar draws with.
 fn meter_fraction(db: f32) -> f32 {
     ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+fn status_message(action: &str, result: Result<(), porta_engine::engine::EngineError>) -> String {
+    match result {
+        Ok(()) => format!("{action}: ok"),
+        Err(e) => format!("{action} failed: {e}"),
+    }
+}
+
+/// Export the whole tape from the top as a 16-bit WAV. Only ever runs
+/// on the UI thread from a button press, never the timer - no REQ-902
+/// concern the way the realtime callback has.
+fn export_wav(engine: &mut Engine, path: &str) -> String {
+    engine.seek(0);
+    let len = engine.manifest().len_samples;
+    let (l, r) = crate::render::mixdown(engine, len);
+    match crate::render::write_wav(path, &l, &r, crate::render::BitDepth::Sixteen) {
+        Ok(()) => format!("exported to {path}"),
+        Err(e) => format!("export failed: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -248,5 +308,46 @@ mod tests {
             1.0,
             "a hot signal doesn't overflow the bar"
         );
+    }
+
+    #[test]
+    fn status_message_reports_ok_and_error() {
+        assert_eq!(status_message("save", Ok(())), "save: ok");
+        let err = Err(porta_engine::engine::EngineError::NotStopped("save"));
+        assert_eq!(
+            status_message("save", err),
+            "save failed: save is only allowed while stopped"
+        );
+    }
+
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("porta-ui-{name}"));
+            let _ = std::fs::remove_dir_all(&p);
+            Self(p)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn export_wav_writes_a_real_wav_file() {
+        let dir = TempDir::new("export");
+        let mut engine = Engine::create(&dir.0, 4_800, 1).unwrap();
+        let out = dir.0.join("out.wav");
+        let status = export_wav(&mut engine, out.to_str().unwrap());
+        assert!(status.starts_with("exported to"), "got: {status}");
+        assert!(out.exists(), "export_wav should have written a file");
+
+        let reader = hound::WavReader::open(&out).unwrap();
+        assert_eq!(reader.spec().channels, 2);
+        assert_eq!(reader.spec().sample_rate, porta_engine::SAMPLE_RATE);
+        assert_eq!(reader.duration(), 4_800);
     }
 }
