@@ -182,6 +182,11 @@ Verification is `cargo test --workspace` plus the noted assertions.
       Verified 2026-08-20 on the MacBook with the L6 at --in-offset 2:
       banner correctly reports "channels 3-6 -> tracks 1-4", arm status
       line toggles correctly through 1/2/1. Full gate green.
+      Follow-up same day: [ and ] only ever nudge the playhead 1 second
+      relative to wherever it is, not to the start - after a take longer
+      than one rewind press, playback only caught the tail of it,
+      reading as a single short fragment. Added a `0` key bound to an
+      absolute Seek { sample: 0 }.
 
 ## M5 - Slint UI
 
