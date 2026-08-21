@@ -25,13 +25,17 @@ from the start, or of the first N seconds.
 
 built with --features realtime:
   porta-app devices
+  porta-app probe [--in NAME]
   porta-app live <dir> [--in NAME] [--out NAME] [--period N]
                        [--in-offset N]
 
 --in-offset skips that many leading input channels before assigning
 the rest to tracks 1-4 in order. Use it on interfaces whose first
 channels carry something other than a per-track send - e.g. --in-offset
-2 on a Zoom L6, whose channels 1-2 are its own main mix.";
+2 on a Zoom L6, whose channels 1-2 are its own main mix. Don't guess
+the offset: run `probe` first, play into one input at a time, and read
+off which channel index actually lights up - interfaces don't always
+order their channels the way you'd expect.";
 
 /// Minimal flag parsing: `--name value`. Returns the value if present.
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -116,6 +120,11 @@ fn cmd_devices() -> Result<(), String> {
         println!("{line}");
     }
     Ok(())
+}
+
+#[cfg(feature = "realtime")]
+fn cmd_probe(args: &[String]) -> Result<(), String> {
+    realtime::probe_input(flag(args, "--in")).map_err(|e| e.to_string())
 }
 
 /// "1R - 2 - 3 - 4R" style summary of which tracks are record-armed.
@@ -240,9 +249,11 @@ fn main() -> ExitCode {
         #[cfg(feature = "realtime")]
         Some("devices") => cmd_devices(),
         #[cfg(feature = "realtime")]
+        Some("probe") => cmd_probe(&args[1..]),
+        #[cfg(feature = "realtime")]
         Some("live") => cmd_live(&args[1..]),
         #[cfg(not(feature = "realtime"))]
-        Some(c @ ("devices" | "live")) => Err(format!(
+        Some(c @ ("devices" | "probe" | "live")) => Err(format!(
             "{c} needs the realtime feature: cargo run -p porta-app --features realtime -- {c}"
         )),
         Some("--help") | Some("-h") | Some("help") | None => {

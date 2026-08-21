@@ -28,7 +28,7 @@ use porta_engine::command::{Command, EngineEvent};
 use porta_engine::engine::Engine;
 use porta_engine::NUM_TRACKS;
 use rtrb::{Consumer, Producer, RingBuffer};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,6 +44,8 @@ const INPUT_RING: usize = 4096;
 pub enum RealtimeError {
     #[error("no output device available")]
     NoOutputDevice,
+    #[error("no input device available")]
+    NoInputDevice,
     #[error("device '{0}' does not support 48kHz")]
     UnsupportedRate(String),
     #[error(transparent)]
@@ -182,6 +184,77 @@ pub fn list_devices() -> Result<Vec<String>, RealtimeError> {
         out.push(format!("input   {d}"));
     }
     Ok(out)
+}
+
+/// Print a live peak-level meter per input channel until the user hits
+/// enter. For working out which physical jack lands on which channel
+/// index on interfaces that don't order them the way you'd guess (the
+/// L6, for one) - play into one input at a time and watch which column
+/// moves, instead of a slow record/render round trip per guess.
+pub fn probe_input(input_name: Option<&str>) -> Result<(), RealtimeError> {
+    let host = cpal::default_host();
+    let device = pick(host.input_devices()?, input_name)
+        .or_else(|| host.default_input_device())
+        .ok_or(RealtimeError::NoInputDevice)?;
+    let name = device.to_string();
+    let channels = max_input_channels(&device)?;
+    let config = StreamConfig {
+        channels,
+        sample_rate: porta_engine::SAMPLE_RATE,
+        buffer_size: BufferSize::Fixed(256),
+    };
+
+    // Bit-pattern max on the abs value; f32's bit ordering matches
+    // numeric ordering for finite non-negative values.
+    let peaks: Arc<Vec<AtomicU32>> = Arc::new((0..channels).map(|_| AtomicU32::new(0)).collect());
+    let peaks_cb = Arc::clone(&peaks);
+    let stride = channels as usize;
+    let stream = device.build_input_stream(
+        config,
+        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            for frame in data.chunks_exact(stride) {
+                for (i, &s) in frame.iter().enumerate() {
+                    peaks_cb[i].fetch_max(s.abs().to_bits(), Ordering::Relaxed);
+                }
+            }
+        },
+        move |err| eprintln!("audio input error: {err}"),
+        None,
+    )?;
+    stream.play()?;
+
+    println!("probing {name} ({channels} channels) - play into one input at a time.");
+    println!("press enter to quit.");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_printer = Arc::clone(&stop);
+    let printer = std::thread::spawn(move || {
+        while !stop_printer.load(Ordering::Relaxed) {
+            let bars: Vec<String> = peaks
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let peak = f32::from_bits(p.swap(0, Ordering::Relaxed));
+                    let db = if peak > 0.0 {
+                        (20.0 * peak.log10()).max(-60.0)
+                    } else {
+                        -60.0
+                    };
+                    format!("ch{}: {db:>5.0}dB", i + 1)
+                })
+                .collect();
+            print!("\r{}   ", bars.join("  "));
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    });
+
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    stop.store(true, Ordering::Relaxed);
+    let _ = printer.join();
+    println!();
+    Ok(())
 }
 
 fn pick(devices: impl Iterator<Item = cpal::Device>, wanted: Option<&str>) -> Option<cpal::Device> {
