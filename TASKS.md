@@ -709,3 +709,27 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       full-size desktop icon show the cassette artwork correctly,
       confirmed via grim's own geometry capture after sips's crop
       flags turned out to be unreliable for this on macOS.
+      Auto-connect + in-app kiosk toggle, same day, requested directly:
+      the UI now tries connecting to whatever device last connected
+      successfully right at startup (reusing the exact same connect()
+      path a manual button press already used, right after the
+      Settings fields are prefilled), instead of always opening Silent
+      and waiting for a click - the appliance is meant to be ready
+      when it's turned on. Silent no-op if nothing's ever been
+      remembered; falls back to Silent with a status message the same
+      way a failed manual Connect would if the device's gone away
+      since. Also added a kiosk-mode toggle button in Settings
+      ("Enter/Exit kiosk mode") - previously the only way in was
+      --kiosk at launch and the only way out was Escape; now it's a
+      real two-way switch, no new property needed since kiosk-mode was
+      already in-out for Escape's sake.
+      Verified for real on the Pi with the L6 actually connected: no
+      manual Connect click, and `pw-cli`/`pw-link` afterward showed
+      two real `porta-app` PipeWire clients with 6 input ports and 4
+      output ports - exactly what offset-2 + 4 tracks against the L6's
+      4-channel output should open, not some fallback default. Didn't
+      chase a visual screenshot of the Settings view this pass (the
+      PipeWire client/port evidence is more conclusive than a screen
+      grab would be anyway); the kiosk-toggle button itself is UI-only
+      logic identical in shape to the already-verified Escape handler,
+      not separately screenshotted.
