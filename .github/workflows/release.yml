@@ -60,15 +60,39 @@ jobs:
             target: x86_64-pc-windows-msvc
             features: realtime,ui
           - name: linux-aarch64
-            # A genuine ARM machine, not cross-compiled - same apt
-            # packages as the x86_64 job below, native arch. Doubles
-            # as a real per-commit signal for M6's Pi aarch64 build,
-            # short of the actual hardware.
+            # A genuine ARM machine, not cross-compiled. Built inside a
+            # debian:bookworm container rather than the runner's own
+            # Ubuntu 24.04 userland: real Raspberry Pi OS is Debian
+            # bookworm (glibc 2.36), Ubuntu 24.04 ships glibc 2.39, and
+            # a glibc binary won't run against an *older* glibc than it
+            # was linked against - confirmed the hard way, 2026-08-21,
+            # by actually copying an Ubuntu-built binary onto a real
+            # Pi 4 and watching it fail with "GLIBC_2.39 not found".
+            # This is the real per-commit signal for M6's Pi aarch64
+            # build the plain-Ubuntu-runner version only looked like.
             os: ubuntu-24.04-arm
+            container: debian:bookworm
             target: aarch64-unknown-linux-gnu
             features: realtime,ui
+    container: ${{ matrix.container }}
     steps:
+      # A bare debian:bookworm image has no git - actions/checkout
+      # needs it, so this has to happen before that step, not folded
+      # into the dependency-install step below.
+      - name: Bootstrap container
+        if: matrix.container != ''
+        run: apt-get update && apt-get install -y git ca-certificates curl
+
       - uses: actions/checkout@v4
+
+      - name: Install Rust (container has none preinstalled)
+        if: matrix.container != ''
+        run: |
+          set -euo pipefail
+          apt-get install -y build-essential pkg-config
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -77,8 +101,9 @@ jobs:
       - name: Install Linux build deps (cpal + Slint)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y \
             libasound2-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig-dev
 
