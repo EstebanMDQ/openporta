@@ -716,21 +716,24 @@ fn connect_cassette(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
     }
 }
 
-/// Pre-fills the output/period/offset fields from whatever was
-/// remembered (M6.1) for the input device blank fields resolve to -
-/// the input field itself stays blank, since "blank = default" is
-/// exactly what picked that device in the first place. A fresh
-/// install with nothing remembered yet leaves main.slint's own
-/// hardcoded defaults untouched.
+/// Pre-fills the input/output/period/offset fields from whatever
+/// connected successfully last time (M6.1). The input field itself
+/// gets filled in too, not left blank - cpal's own "default device"
+/// resolution can't be trusted to land back on the same device (on
+/// the pipewire host it's a generic two-channel pseudo-device, not a
+/// real proxy to a multichannel interface like the L6; found
+/// 2026-08-21). A fresh install with nothing remembered yet leaves
+/// main.slint's own hardcoded defaults untouched.
 #[cfg(feature = "realtime")]
 fn prefill_remembered_audio_settings(ui: &MainWindow) {
-    let Some(name) = crate::realtime::resolve_input_device_name(None) else {
-        return;
-    };
     let config = crate::device_config::DeviceConfig::load();
-    let Some(remembered) = config.get(&name) else {
+    let Some(name) = config.last_input_device() else {
         return;
     };
+    let Some(remembered) = config.get(name) else {
+        return;
+    };
+    ui.set_input_device_text(name.into());
     if let Some(output) = &remembered.output_device {
         ui.set_output_device_text(output.clone().into());
     }

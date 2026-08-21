@@ -7,6 +7,16 @@
 //! offsets (a Zoom L6 and a PreSonus Quantum 2626 don't wire their
 //! inputs the same way).
 //!
+//! Also remembers the *name itself* of the last input device that
+//! connected successfully, and callers substitute it for a blank
+//! `--in`/input field rather than leaving that to cpal's own default
+//! resolution. Found 2026-08-21 testing this on the Pi: cpal's
+//! PipeWire host resolves "no device given" to a generic two-channel
+//! `default_input` pseudo-device, not a real proxy to whatever's
+//! actually plugged in - fine for a plain stereo mic, useless for a
+//! 12-channel interface like the L6. Substituting the remembered name
+//! sidesteps that pseudo-device entirely.
+//!
 //! Deliberately just an offset, not a full per-track channel
 //! assignment - every device this has actually been run against wants
 //! a contiguous block starting somewhere, and a free-form assignment
@@ -35,6 +45,8 @@ pub struct DeviceSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceConfig {
     #[serde(default)]
+    last_input_device: Option<String>,
+    #[serde(default)]
     devices: HashMap<String, DeviceSettings>,
 }
 
@@ -55,6 +67,12 @@ impl DeviceConfig {
             .unwrap_or_default()
     }
 
+    /// What to substitute for a blank `--in`/input field - see the
+    /// module doc comment for why that can't just be left blank.
+    pub fn last_input_device(&self) -> Option<&str> {
+        self.last_input_device.as_deref()
+    }
+
     pub fn get(&self, input_device_name: &str) -> Option<&DeviceSettings> {
         self.devices.get(input_device_name)
     }
@@ -72,6 +90,7 @@ impl DeviceConfig {
         input_channel_offset: usize,
     ) {
         let mut config = Self::load();
+        config.last_input_device = Some(input_device_name.to_string());
         config.devices.insert(
             input_device_name.to_string(),
             DeviceSettings {
@@ -102,14 +121,19 @@ mod tests {
 
     #[test]
     fn missing_or_unparseable_config_reads_as_empty() {
-        assert!(DeviceConfig::default().get("L6 Multichannel").is_none());
+        let config = DeviceConfig::default();
+        assert!(config.get("L6 Multichannel").is_none());
+        assert!(config.last_input_device().is_none());
         let garbage: Result<DeviceConfig, _> = serde_json::from_str("not json");
         assert!(garbage.is_err());
     }
 
     #[test]
     fn round_trips_through_json() {
-        let mut config = DeviceConfig::default();
+        let mut config = DeviceConfig {
+            last_input_device: Some("L6 Multichannel".to_string()),
+            ..Default::default()
+        };
         config.devices.insert(
             "L6 Multichannel".to_string(),
             DeviceSettings {
@@ -120,6 +144,7 @@ mod tests {
         );
         let json = serde_json::to_string(&config).unwrap();
         let reloaded: DeviceConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.last_input_device(), Some("L6 Multichannel"));
         let entry = reloaded.get("L6 Multichannel").unwrap();
         assert_eq!(entry.input_channel_offset, 2);
         assert_eq!(entry.period, 256);
@@ -153,5 +178,25 @@ mod tests {
             2
         );
         assert_eq!(config.get("Quantum 2626").unwrap().input_channel_offset, 0);
+    }
+
+    /// The bug this whole last_input_device field exists to route
+    /// around: a blank field can't be trusted to resolve back to the
+    /// same device a name-based remember() call used as its key.
+    #[test]
+    fn remembers_which_device_name_to_substitute_for_a_blank_field() {
+        let config = DeviceConfig {
+            last_input_device: Some("L6 Multichannel".to_string()),
+            devices: HashMap::from([(
+                "L6 Multichannel".to_string(),
+                DeviceSettings {
+                    output_device: Some("L6 Analog Surround 4.0".to_string()),
+                    period: 256,
+                    input_channel_offset: 2,
+                },
+            )]),
+        };
+        let effective_name = config.last_input_device().unwrap();
+        assert_eq!(config.get(effective_name).unwrap().input_channel_offset, 2);
     }
 }

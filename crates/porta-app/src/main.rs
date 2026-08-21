@@ -176,26 +176,29 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
 
     let dir = args.first().ok_or("live needs a project directory")?;
     let engine = Engine::open(dir).map_err(|e| e.to_string())?;
-    let in_name = flag(args, "--in");
-    let out_name = flag(args, "--out");
+    let in_flag = flag(args, "--in");
+    let out_flag = flag(args, "--out");
     let period_flag = parse_num::<usize>(args, "--period")?;
     let offset_flag = parse_num::<usize>(args, "--in-offset")?;
 
-    // A flag always wins; otherwise fall back to whatever was
-    // remembered the last time this same input device connected
-    // successfully (M6.1 - see device_config), then a hardcoded
-    // default. Which remembered settings apply depends on which
-    // physical device --in (or the system default) actually resolves
-    // to, so that has to be worked out before negotiating a stream.
+    // A flag always wins. Otherwise, a blank --in falls back to
+    // whichever device last connected successfully (M6.1's whole
+    // point is not retyping this every launch) rather than cpal's own
+    // "default device" - on the pipewire host that's a generic
+    // two-channel pseudo-device, not a real proxy to the L6 (found
+    // 2026-08-21). Only once a real device name is settled can its
+    // remembered period/offset/output be looked up.
+    let config = device_config::DeviceConfig::load();
+    let in_name = in_flag.or_else(|| config.last_input_device());
     let resolved_input_name = realtime::resolve_input_device_name(in_name);
     let remembered = resolved_input_name
         .as_deref()
-        .and_then(|name| device_config::DeviceConfig::load().get(name).cloned());
+        .and_then(|name| config.get(name).cloned());
     let period = period_flag.or(remembered.as_ref().map(|r| r.period));
     let channel_offset = offset_flag
         .or(remembered.as_ref().map(|r| r.input_channel_offset))
         .unwrap_or(0);
-    let out_name = out_name.or(remembered.as_ref().and_then(|r| r.output_device.as_deref()));
+    let out_name = out_flag.or(remembered.as_ref().and_then(|r| r.output_device.as_deref()));
 
     let mut session = realtime::start(engine, in_name, out_name, period, channel_offset)
         .map_err(|e| e.to_string())?;
