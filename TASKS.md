@@ -74,6 +74,27 @@ Verification is `cargo test --workspace` plus the noted assertions.
 - [x] M3.2 Mixdown renderer + WAV export, 16-bit default / 24-bit flag
       (verify: script export and render command are byte-identical,
       headers correct at both depths)
+      Follow-up 2026-08-21, requested directly: MP3 alongside WAV -
+      WAV stays the master (lossless, tunable --bits), MP3 is a
+      convenience format to share, fixed at 192kbps, no new flag -
+      `render`/`export --out` pick the format from the extension, and
+      the UI got a second "Export MP3" button that swaps the existing
+      export path's extension rather than needing its own field.
+      shine-rs (pure Rust MP3 encoder, LGPL-2.0) over the LAME-binding
+      alternative specifically to avoid an autotools-in-CI repeat of
+      the pipewire saga - it needs nothing beyond a Rust compiler,
+      release.yml untouched. Every real Rust MP3 encoder is LGPL
+      (LAME and Shine both are); no permissively-licensed alternative
+      exists in the ecosystem today. Verified for real, not just unit
+      tests: rendered both formats from an actual cassette, confirmed
+      the .mp3 with `file`/macOS's afinfo (valid MPEG Layer III,
+      correct duration/bitrate/channels - genuinely decodable), and
+      redeployed to the Pi to confirm the same on real aarch64
+      hardware (`file` there reports identical: MPEG ADTS, layer III,
+      v1, 192kbps, 48kHz, JntStereo). UI button visually confirmed via
+      a real screenshot on the Pi; the click itself wasn't remotely
+      testable (no input injection there), but it calls the exact same
+      render::write_mp3 already verified through the CLI.
 - [x] M3.3 porta-app CLI: new/script/render/export subcommands + script
       `bounce` op (verify: cli.rs drives the real binary, bad arguments
       rejected)
