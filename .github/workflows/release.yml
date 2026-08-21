@@ -37,6 +37,14 @@ jobs:
     name: ${{ matrix.name }}
     needs: gate
     runs-on: ${{ matrix.os }}
+    # A bare debian:bookworm container's default `sh` is dash, which
+    # doesn't understand `set -o pipefail` - found the hard way, the
+    # aarch64 job's first run failed on exactly that. Every other
+    # runner in this matrix defaults `run:` to bash already; this just
+    # makes it explicit and uniform instead of container-dependent.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
