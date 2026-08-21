@@ -403,6 +403,31 @@ Verification is `cargo test --workspace` plus the noted assertions.
       feature combinations); visual confirmation on the real screen
       (Mac screen locked, Pi needs the new binary redeployed) is the
       next step, not done as of this commit.
+      Second follow-up fix, same day: 440px still wasn't enough - real
+      content was ~600px tall, so even a full-height window scrolled
+      for most of the track strips. Compacted the layout for real
+      (smaller MeterBar, tighter padding/spacing throughout, counter +
+      transport-state sharing one row) to ~410px, so it fits the real
+      screen without scrolling at all; ScrollView stays as a fallback,
+      not the primary fix. Also added the seek-to-start/end and
+      rewind/fast-forward-by-1s buttons that had been missing from the
+      UI entirely (cmd_live has always had them via [ ] and 0 -
+      Transport::seek already clamps to tape length, so "go to end" is
+      just `Seek { sample: usize::MAX }`, no tape-length tracking
+      needed in the UI), and a `--kiosk` flag (off by default) that
+      sets Slint's own full-screen/no-frame Window properties rather
+      than reconfiguring the Pi's desktop - keeps kiosk behavior
+      versioned with the binary instead of a manual setting that
+      wouldn't survive a reflash.
+      Verified for real this time, not just gate-green: built via CI,
+      deployed to the Pi, launched in its actual graphical session,
+      and screenshotted with grim (`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`
+      exported over ssh - a plain ssh session has neither). Windowed:
+      the whole UI - cassette row, audio settings, transport with the
+      new seek/rewind/ff buttons, all 4 tracks, master, save/undo/
+      export - fits inside the window with nothing cut off. `--kiosk`:
+      genuine fullscreen, no titlebar, no wf-panel-pi taskbar visible,
+      the app owns the whole 800x480 screen.
 
 ## Release process
 
