@@ -139,6 +139,24 @@ Verification is `cargo test --workspace` plus the noted assertions.
       Stop/Record path (or a callback-timing regression test), plus a
       repeat of the manual checklist's record/stop step showing zero
       cpal-reported xruns.
+- [ ] M4.5 `live` has no working path to persist anything. Found
+      2026-08-20 during the hardware checklist: recorded takes are lost
+      the moment the process exits (tape/*.raw and undo/journal.json
+      never touched after `new`; a `render` right after a live session
+      is silent). `cmd_live` (main.rs) has no key bound to
+      Command::Save, and RealtimeSession::send unconditionally rejects
+      all blocking commands (Save/Bounce/Undo/Redo) rather than routing
+      them anywhere - realtime::start moves Engine into the audio
+      callback closure, so there is currently no control-thread path
+      back to it at all. The "bounced to the control thread" half of
+      the design described in M4.2/command.rs was never implemented,
+      only the "reject so it can't stall the callback" half. Likely
+      shares its fix with M4.4 (both need a real handoff between the
+      audio thread and a control thread that can safely touch the
+      engine while stopped). Verify: a live session that records, then
+      saves, then a fresh `render` in a new process shows the take;
+      cargo test coverage for the save path if one can be added
+      headlessly via the simulated audio thread (realtime_sim.rs).
 
 ## M5 - Slint UI
 
