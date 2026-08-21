@@ -540,6 +540,23 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
             refresh(&ui, &slot.as_ref().unwrap().snapshot());
         });
     }
+    {
+        let backend = Rc::clone(&backend);
+        let ui_weak = ui.as_weak();
+        ui.on_export_mp3_pressed(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let cassette_path = ui.get_cassette_path().to_string();
+            let mp3_path = mp3_export_path(ui.get_export_path().as_ref());
+            let mut slot = backend.borrow_mut();
+            let status = with_engine(&mut slot, &cassette_path, |engine| {
+                export_mp3(engine, &mp3_path)
+            });
+            ui.set_status_text(status.into());
+            refresh(&ui, &slot.as_ref().unwrap().snapshot());
+        });
+    }
 
     let timer = slint::Timer::default();
     {
@@ -916,6 +933,28 @@ fn export_wav(engine: &mut Engine, path: &str) -> String {
     }
 }
 
+/// Same base name/location as the WAV export path, extension swapped
+/// to .mp3 - "Export MP3" reuses whatever's already typed there rather
+/// than needing a second path field.
+fn mp3_export_path(wav_export_path: &str) -> String {
+    std::path::Path::new(wav_export_path)
+        .with_extension("mp3")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Export the whole tape from the top as an MP3 (the share format,
+/// fixed bitrate - see render::write_mp3; WAV is the master).
+fn export_mp3(engine: &mut Engine, path: &str) -> String {
+    engine.seek(0);
+    let len = engine.manifest().len_samples;
+    let (l, r) = crate::render::mixdown(engine, len);
+    match crate::render::write_mp3(path, &l, &r) {
+        Ok(()) => format!("exported to {path}"),
+        Err(e) => format!("export failed: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,6 +1006,15 @@ mod tests {
     }
 
     #[test]
+    fn mp3_export_path_swaps_the_extension() {
+        assert_eq!(
+            mp3_export_path("/Users/me/takes/export.wav"),
+            "/Users/me/takes/export.mp3"
+        );
+        assert_eq!(mp3_export_path("relative/take"), "relative/take.mp3");
+    }
+
+    #[test]
     fn non_empty_blank_means_default() {
         assert_eq!(non_empty(""), None);
         assert_eq!(non_empty("   "), None);
@@ -1002,6 +1050,25 @@ mod tests {
         assert_eq!(reader.spec().channels, 2);
         assert_eq!(reader.spec().sample_rate, porta_engine::SAMPLE_RATE);
         assert_eq!(reader.duration(), 4_800);
+    }
+
+    #[test]
+    fn export_mp3_writes_a_real_mp3_file() {
+        let dir = TempDir::new("export-mp3");
+        let mut engine = Engine::create(&dir.0, 4_800, 1).unwrap();
+        let out = dir.0.join("out.mp3");
+        let status = export_mp3(&mut engine, out.to_str().unwrap());
+        assert!(status.starts_with("exported to"), "got: {status}");
+        // A real MPEG frame sync (11 set bits) at the start, not just a
+        // file with the right name - encoding actually happened.
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(!bytes.is_empty(), "export_mp3 should have written data");
+        assert_eq!(bytes[0], 0xFF, "should start with an MPEG frame sync");
+        assert_eq!(
+            bytes[1] & 0xE0,
+            0xE0,
+            "should start with an MPEG frame sync"
+        );
     }
 
     #[test]

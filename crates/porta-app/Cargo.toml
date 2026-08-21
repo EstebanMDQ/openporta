@@ -9,6 +9,11 @@ build = "build.rs"
 porta-engine = { workspace = true }
 porta-dsp = { workspace = true }
 hound = { workspace = true }
+# MP3 export alongside WAV: pure Rust (no C toolchain, unlike the LGPL
+# alternative wrapping LAME via autotools), so no release.yml build-dep
+# changes needed on any platform. LGPL-2.0, same as every real MP3
+# encoder in the Rust ecosystem today - none are permissively licensed.
+shine-rs = "0.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

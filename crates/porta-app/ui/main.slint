@@ -115,6 +115,7 @@ export component MainWindow inherits Window {
     callback save-pressed();
     callback undo-pressed();
     callback export-pressed();
+    callback export-mp3-pressed();
     callback new-pressed();
     callback load-pressed();
     callback connect-pressed();
@@ -325,6 +326,7 @@ export component MainWindow inherits Window {
                     text <=> export-path;
                 }
                 Button { text: "Export WAV"; clicked => { export-pressed(); } }
+                Button { text: "Export MP3"; clicked => { export-mp3-pressed(); } }
             }
             Text {
                 text: status-text;
