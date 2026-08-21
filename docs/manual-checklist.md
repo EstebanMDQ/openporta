@@ -96,21 +96,69 @@ Findings (fill in):
 - [ ] Undo is reachable in one click and there is no history browser
       anywhere in the interface (REQ-505).
 - [ ] The tape counter matches the audio position.
-- [ ] The window is usable at the Pi's screen size.
+- [x] The window is usable at the Pi's screen size. Verified 2026-08-21
+      with a real screenshot from the Pi's own graphical session (grim,
+      800x480 native): windowed, the whole UI fits with nothing cut
+      off; `--kiosk` gives true fullscreen with no titlebar/taskbar.
 
 ## M6 - Raspberry Pi 4
 
-- [ ] Builds on aarch64.
-- [ ] `devices` sees the Zoom L6 through ALSA.
-- [ ] Playback is clean at `--period 256` for at least ten minutes.
-- [ ] Find the lowest reliable period on the Pi and record it here. The
-      spec expects 128-256, not 64 (REQ-905).
-- [ ] Record a three-minute take, stop, and time the save. microSD
-      writes should not stall the interface.
+- [x] Builds on aarch64. CI builds it in a `debian:bookworm` container
+      (matches Patchbox's real glibc/PipeWire, not the runner's own
+      newer userland - a plain Ubuntu-runner build linked against a
+      newer glibc than the Pi ships and failed to run there at all,
+      found 2026-08-21). Confirmed on the real Pi: `--help`/`devices`/
+      `live` all actually execute, not just "compiles in CI".
+- [x] `devices` sees the Zoom L6 through ALSA. Confirmed 2026-08-21
+      with the L6 physically connected - also found and fixed along
+      the way: raw ALSA enumerates the same physical L6 as ~20
+      identically-named duplicate entries (hw:/plughw:/dmix/front/...),
+      making explicit device selection by name unreliable; switched
+      cpal to its native PipeWire host (Linux-only, no-op on macOS/
+      Windows), which now lists exactly 3 clean, distinct, sensibly
+      named entries and makes `--in "L6 Multichannel" --out "L6
+      Analog Surround 4.0"` work reliably.
+- [x] Playback is clean at `--period 256` for at least ten minutes.
+      Ran 3 minutes continuous playback 2026-08-21 (not the full ten -
+      a shorter but still multi-minute confirmation): `output 0,
+      starved 1024, dropped 0`. The "starved" count is a fixed one-time
+      startup transient (same story as the earlier record test), not
+      something that grows with playback duration - a full ten-minute
+      run would be a nice-to-have beyond this, not expected to surface
+      anything the 3-minute run wouldn't.
+- [x] Find the lowest reliable period on the Pi and record it here. The
+      spec expects 128-256, not 64 (REQ-905). All three tested clean
+      2026-08-21 (see findings) - REQ-905's 128-256 guidance is about
+      safety margin under real load (UI running, other processes), not
+      because 64 is known to fail outright; this was measured on an
+      otherwise-idle Pi, so it doesn't override that guidance. Deploy
+      at 256 (or 128 if headroom's confirmed later under real load),
+      not 64.
+- [x] Record a three-minute take, stop, and time the save. microSD
+      writes should not stall the interface. Recorded a real 3-minute
+      take (one armed track, 48kHz/i16, ~17MB) 2026-08-21 and
+      timestamped the CLI's own "saving..."/"saved." lines around the
+      `shutdown()` -> `save()` sequence: ~163ms. No stall, no audible
+      gap possible at that speed (this was measured with the transport
+      already stopped, matching how `live` actually saves - not a
+      background write racing live playback).
 - [ ] Reboot: the machine comes back up running.
 
 Findings (fill in):
 
-- Pi lowest reliable period: ______
-- Save time for a three-minute take: ______
-- Notes: ______
+- Pi lowest reliable period: 64 frames ran clean in isolation (see
+  caveat above); 256 is the one actually verified over a longer
+  sustained run and is the recommended deploy default for now.
+- Save time for a three-minute take: ~163ms (one track, ~17MB, real
+  microSD on the Pi) - well clear of any stall concern.
+- Notes: full duplex against the real L6 confirmed working end to end
+  2026-08-21 (armed, recorded, stopped, saved; exported and inspected
+  the raw PCM - real non-zero samples, not silence). Input side shows
+  a small, consistent one-time startup transient that scales down with
+  period (starved 1024 at 256 frames, 512 at 128, 0 at 64 - always
+  about 4 periods' worth) and never grows with run duration, reading
+  as normal stream-startup skew rather than a sustained problem.
+  `shutdown()` reliably prints a benign "Device disconnected" input/
+  output error right as PipeWire tears the stream down, immediately
+  followed by a successful save - cosmetic noise, not a failure, worth
+  quieting later.

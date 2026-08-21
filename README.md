@@ -39,8 +39,8 @@ audio thread until the realtime adapter is wired into it (M5.5).
 | M2 lo-fi DSP and generation loss | done |
 | M3 bounce, mixdown, WAV export, CLI | done |
 | M4 realtime audio (cpal) | verified on macOS hardware |
-| M5 Slint UI: transport, track strips, meters, save/undo/export, cassette new/load | done; real audio in the UI is M5.5 |
-| M6 Raspberry Pi deployment | not started |
+| M5 Slint UI: transport, track strips, meters, save/undo/export, cassette new/load, real audio (M5.5) | done |
+| M6 Raspberry Pi deployment | in progress - aarch64 build, ALSA/PipeWire device layer, and full-duplex record/save all verified against a real Zoom L6 on the Pi; persisted device config (M6.1) and kiosk auto-launch (M6.3) still open |
 
 Today you drive it through session scripts, the CLI, or the UI.
 `TASKS.md` is the queue.
