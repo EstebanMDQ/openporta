@@ -209,8 +209,14 @@ Verification is `cargo test --workspace` plus the noted assertions.
 
 ## M6 - Raspberry Pi 4 deployment
 
-- [ ] M6.1 aarch64 build, cpal-ALSA, config for L6 device name and period
-      settings (verify: on-device smoke checklist)
+- [ ] M6.1 aarch64 build, cpal-ALSA, config for L6 device name, period,
+      and input channel offset settings (verify: on-device smoke
+      checklist). Channel offset landed as a `--in-offset` CLI flag in
+      M4.6 (`live --in-offset 2` currently: L6 channels 3-6 -> tracks
+      1-4, decided 2026-08-20) - fine for manual testing, but it
+      needs to persist as real project/device config rather than being
+      retyped every run, and this is the natural place to do that
+      alongside device name and period.
 - [ ] M6.2 Performance pass: 128-256 frame period, callback-time
       instrumentation (verify: measured headroom documented in repo)
 - [ ] M6.3 systemd/kiosk launch, microSD save-timing check, Pi setup README
