@@ -332,6 +332,22 @@ Verification is `cargo test --workspace` plus the noted assertions.
       .../m54-b.porta". New produced a real cassette on disk and
       "created .../m54-new-cassette.porta". Clean quit, no panics.
       Full gate green.
+- [ ] M5.5 Wire the realtime adapter into the Slint UI, plus a
+      settings panel for device/channel/period selection. Raised
+      2026-08-21: the `ui` feature currently drives the engine with a
+      silent Slint timer standing in for the audio thread - there is
+      no real audio in the GUI at all, so a settings screen would have
+      nothing to configure yet. This is the actual prerequisite.
+      The realtime protocol (Command/EngineEvent, RealtimeSession) from
+      M4 already exists and is tested - `ui.rs` would become a
+      different consumer of it, polling session.poll()/calling
+      session.send() from a Slint timer instead of owning Engine
+      directly, the way cmd_live already does from the terminal. Real
+      complication: EngineEvent::Levels is still never emitted by
+      realtime.rs (found during M5.2, not fixed there since the UI
+      skeleton didn't need it yet) - metering in a realtime-backed UI
+      needs that wired up for real, not the local Mixer peek the
+      silent-timer skeleton uses today.
 
 ## M6 - Raspberry Pi 4 deployment
 
