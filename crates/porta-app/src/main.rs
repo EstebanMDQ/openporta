@@ -172,7 +172,10 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
         None => println!("input:  (none)"),
     }
     println!("period: {} frames", session.period);
-    println!("keys: p play, s stop, r record, 1-4 arm/disarm, [ rew, ] ff, q quit");
+    println!(
+        "keys: p play, s stop, r record, 1-4 arm/disarm, 0 seek to start, \
+         [ rew 1s, ] ff 1s, q quit"
+    );
     let mut armed = [false; porta_engine::NUM_TRACKS];
     println!("  {}", arm_status(&armed));
 
@@ -182,6 +185,7 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
             "p" => Some(Command::Play),
             "s" => Some(Command::Stop),
             "r" => Some(Command::Record),
+            "0" => Some(Command::Seek { sample: 0 }),
             "[" => Some(Command::Rewind { samples: 48_000 }),
             "]" => Some(Command::FastForward { samples: 48_000 }),
             t if matches!(t, "1" | "2" | "3" | "4") => {
