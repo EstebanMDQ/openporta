@@ -518,6 +518,47 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       device-name/period/offset smoke checklist against a live L6
       still needs it physically reconnected - not something doable
       over ssh.
+      On-device smoke test 2026-08-21, L6 now physically connected:
+      real full duplex against the actual interface, on the actual
+      target hardware, for the first time. `lsusb`/`arecord -l`/
+      `pw-cli` all recognize it correctly (card 3, "L6 Multichannel"
+      input, "L6 Analog Surround 4.0" output, PipeWire auto-promoted
+      it to the system default sink/source the moment it was plugged
+      in). `probe --in "L6"` opened a real 12-channel capture stream
+      cleanly.
+      One real snag: naming the device explicitly (`--in "L6" --out
+      "L6"`) failed with "the requested stream configuration is not
+      supported by the device". `devices` explains why - ALSA
+      enumerates the same physical L6 many times over (hw:, plughw:,
+      dmix, front, surround40, iec958, ...), and cpal's `Display` for
+      all of them is just the card's description, so `porta-app
+      devices` lists roughly a dozen entries that all print as `L6,
+      USB Audio` with no way to tell them apart by name - some of
+      those routes are raw `hw:` devices that reject a config the
+      broader `plughw:`/PipeWire-native ones would happily convert.
+      `pick()` matches by name and has no way to know which duplicate
+      it grabbed. Blank device fields (`live --in-offset 2`, no
+      `--in`/`--out`) sidestep this entirely by asking cpal for its
+      *default* device instead of naming one - and since PipeWire had
+      already made the L6 that default, this Just Worked: armed track
+      1, recorded 2s and separately 8s, stopped, saved, all clean.
+      `xruns: output 0, starved 0, dropped ~7-8k` both runs - the drop
+      count didn't scale with duration (rules out a sustained clock-
+      drift problem; reads as a fixed startup transient before the
+      input ring reaches steady state, ~150-170ms worth of samples).
+      Exported the recording and inspected the raw PCM (peak 18, rms
+      5.4 of int16 full scale) - real, non-zero samples made it the
+      entire way through capture -> per-track ring -> tape -> mixdown,
+      just quiet (self-noise/room ambient, nothing was intentionally
+      played into it for this pass).
+      Net: the pipeline itself is solid end to end on real hardware.
+      The name-collision problem is a real usability gap worth solving
+      before M6.1's persisted device config leans on typed names the
+      same way - either preferring PipeWire's own node identity over
+      raw ALSA card names on Linux, or having `pick()`/`negotiate()`
+      skip a duplicate that fails to open and try the next match
+      rather than surfacing the first failure. Not fixed yet - flagging
+      it for M6.1 proper rather than patching around it now.
 - [ ] M6.2 Performance pass: 128-256 frame period, callback-time
       instrumentation (verify: measured headroom documented in repo)
 - [ ] M6.3 systemd/kiosk launch, microSD save-timing check, Pi setup README
