@@ -188,6 +188,20 @@ impl Mixer {
             // balance independent of the overall volume knob.
             self.track_peak[t] = peak * fader_amp;
         }
+        // Hard safety ceiling on the summed output, not just the
+        // offline WAV writer's own clamp (render.rs quantizes with one
+        // too - this makes the live monitoring path match it instead
+        // of being the one place nothing stops an extreme value from
+        // reaching a real speaker or headphones). Four tracks at up to
+        // +12dB of fader gain each plus the master can genuinely sum
+        // past 0dBFS; this is the last line of defense before that
+        // reaches hardware, not a substitute for sane gain staging.
+        for s in out_l.iter_mut() {
+            *s = s.clamp(-1.0, 1.0);
+        }
+        for s in out_r.iter_mut() {
+            *s = s.clamp(-1.0, 1.0);
+        }
         self.master_peak = (
             out_l.iter().fold(0.0f32, |acc, &s| acc.max(s.abs())),
             out_r.iter().fold(0.0f32, |acc, &s| acc.max(s.abs())),
@@ -265,6 +279,31 @@ mod tests {
         assert_no_clicks!(&left);
         // And the jump actually happened.
         assert!(rms_dbfs(&left[..4800]) - rms_dbfs(&left[43_200..]) > 20.0);
+    }
+
+    #[test]
+    fn output_never_exceeds_full_scale_even_with_hot_gain_staging() {
+        // Four tracks, each already at 0dBFS peak, all faders pushed to
+        // the UI's new maximum (+12dB): a real "gain was too high"
+        // scenario, not a synthetic edge case. Unclamped this would
+        // peak at roughly +12dB over full scale - loud enough to be a
+        // real hazard through headphones, found 2026-08-21 from an
+        // actual feedback/peak report while recording.
+        let mut m = Mixer::new();
+        for t in 0..NUM_TRACKS {
+            m.set_fader_db(t, 12.0);
+        }
+        let s = sine(500.0, 0.0, 4800);
+        let inputs: [&[f32]; NUM_TRACKS] = [&s, &s, &s, &s];
+        let mut l = vec![0.0; 4800];
+        let mut r = vec![0.0; 4800];
+        m.mix_block(&inputs, &mut l, &mut r);
+        m.mix_block(&inputs, &mut l, &mut r); // let the fader ramp settle
+        let peak = l
+            .iter()
+            .chain(r.iter())
+            .fold(0.0f32, |acc, &s| acc.max(s.abs()));
+        assert!(peak <= 1.0, "output exceeded full scale: peak={peak}");
     }
 
     #[test]
