@@ -387,6 +387,22 @@ Verification is `cargo test --workspace` plus the noted assertions.
       pass with the screen unlocked - not done yet, tracked
       separately, not blocking the commit since the gate is the
       project's actual definition of done.
+      Follow-up fix 2026-08-21: reported against the real Pi kiosk
+      display (800x480 native, checked via wlr-randr on-device - even
+      smaller than the 800x600 first reported) - the window used a
+      fixed `width`/`height` (Slint pins that to a non-resizable
+      window, maximize is then a no-op) sized well under the content's
+      actual ~600px layout height, so most of the bottom of the UI was
+      permanently off-screen with no way to reach it. Switched to
+      `preferred-width`/`preferred-height` + `min-width`/`min-height`
+      so the window manager can resize and maximize it, wrapped the
+      content in a `ScrollView` so anything still too tall to fit
+      stays reachable instead of silently clipped, and tuned
+      preferred-height to 440px to roughly fit the actual kiosk panel
+      under its window-manager chrome. Full gate green (all four
+      feature combinations); visual confirmation on the real screen
+      (Mac screen locked, Pi needs the new binary redeployed) is the
+      next step, not done as of this commit.
 
 ## Release process
 
