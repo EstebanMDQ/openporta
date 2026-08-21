@@ -48,10 +48,10 @@ fast-forward, `q` quit.
       Punching in works mechanically (confirmed 2026-08-20); click
       quality at the boundary not yet confirmed either way.
 - [ ] `q` prints an xrun summary. On the MacBook it should be all
-      zeros at `--period 256`. **Currently fails**: `audio input
-      error`/`audio output error` (a real CoreAudio xrun) reliably
-      prints right after `s`, at every period tried - this is M4.4, see
-      below. Recheck this box once M4.4 lands.
+      zeros at `--period 256`. Was reliably failing (`audio input
+      error`/`audio output error` right after `s`, at every period
+      tried) - root-caused and fixed as M4.4 2026-08-20, needs a
+      hardware re-run to confirm the xrun is actually gone now.
 - [ ] Try `--period 128` and `--period 64`. Both ran (2026-08-20); the
       specific lowest clean-during-playback period hasn't been pinned
       down yet - fill in below once it has.
@@ -70,10 +70,12 @@ Findings (fill in):
   `devices` (UB from a non-mut out-param in coreaudio device listing);
   fixed by bumping to cpal 0.18. Separately, going record -> stop
   reliably logged a CoreAudio buffer overrun at every period tried, not
-  reflected in the app's own xrun counters - root cause is a disk write
-  and allocation reachable from `Command::Stop` inside the realtime
-  callback (REQ-902 violation), tracked as M4.4 in TASKS.md, still
-  open. Also found: `live` never persisted anything (no Save path
+  reflected in the app's own xrun counters - root cause was a disk write
+  and allocation reachable from `Command::Stop` (and from process_block
+  itself) inside the realtime callback (REQ-902 violation), fixed as
+  M4.4: the journal write is now deferred to save/undo/redo, which
+  never run on the realtime thread. Needs a hardware re-run to confirm.
+  Also found: `live` never persisted anything (no Save path
   reachable from the audio thread) - fixed as M4.5, verified on the L6
   (record, quit, saw "saved.", fresh render showed the take). Also
   found: input capture only ever opened 1 channel and broadcast it to

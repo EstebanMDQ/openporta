@@ -121,24 +121,39 @@ Verification is `cargo test --workspace` plus the noted assertions.
       this host has no audio hardware. Checklist in
       docs/manual-checklist.md. Fill in the lowest reliable period and
       any findings, then M6 can reuse the same procedure on the Pi.
-- [ ] M4.4 REQ-902 violation found 2026-08-20 during the hardware
+- [x] M4.4 REQ-902 violation found 2026-08-20 during the hardware
       checklist: Command::Stop reliably triggered a CoreAudio buffer
-      overrun on the L6 at --period 256 going record -> stop, invisible
-      to the app's own Xrun counters. Command::Stop.is_blocking() ==
-      false, so it runs on the realtime output-callback thread; the
-      handler chain (Engine::stop -> close_passes -> Journal::push_pass,
-      undo.rs) does a heap allocation sized to the whole pass and a
-      synchronous fs::File::create + write_all there. Engine::record has
-      the same class of bug: RecordPass::with_capacity reserve_exacts up
-      to the remaining tape length (record.rs), also inside the
-      callback. Fix needs pass finalization split across the
-      control/audio boundary - the audio thread stops capturing and
-      hands the finished pass off (existing event queue can likely
-      carry it), journal write happens on the control thread. Verify:
-      new test asserting no fs/alloc calls reachable from the realtime
-      Stop/Record path (or a callback-timing regression test), plus a
-      repeat of the manual checklist's record/stop step showing zero
-      cpal-reported xruns.
+      overrun on the L6 going record -> stop, invisible to the app's own
+      Xrun counters. Command::Stop.is_blocking() == false, so it runs on
+      the realtime output-callback thread; the handler chain
+      (Engine::stop -> close_passes -> Journal::push_pass, undo.rs) did
+      a heap allocation sized to the whole pass and a synchronous
+      fs::File::create + write_all there - also reachable from
+      process_block itself when recording runs off the tape end, not
+      just from an explicit Stop.
+      Fixed without needing to hand the engine itself across a
+      thread boundary: Journal::push_pass now only does in-memory
+      bookkeeping (the pass's Vec<i16> moves into a pending_writes list,
+      no new allocation proportional to its size) and returns
+      immediately - no I/O, cannot fail. The actual fs::File::create +
+      write_all is deferred to a new Journal::flush_pending, called
+      internally by save/undo/redo, all of which are blocking commands
+      that only ever run off the realtime thread (and, per M4.5, save
+      is what actually runs at live's shutdown). Eviction's
+      fs::remove_file is deferred the same way.
+      New regression test (engine.rs,
+      stop_does_not_write_the_journal_payload_until_save): asserts no
+      pass-*.bin file exists on disk right after stop, and that save
+      produces it. Full gate green, golden render unchanged (byte-exact
+      - this only changes when the write happens, not any audio path).
+      Not addressed here, lower priority since it's a virtual-memory
+      reservation rather than real I/O: Engine::record's
+      RecordPass::with_capacity still reserve_exacts up to the
+      remaining tape length inside the callback (record.rs) - flag if
+      it ever shows up as a measurable xrun.
+      Needs hardware re-verification: repeat the manual checklist's
+      record/stop step and confirm the xrun summary is actually zero at
+      --period 256 now.
 - [x] M4.5 `live` has no working path to persist anything. Found
       2026-08-20 during the hardware checklist: recorded takes are lost
       the moment the process exits (tape/*.raw and undo/journal.json

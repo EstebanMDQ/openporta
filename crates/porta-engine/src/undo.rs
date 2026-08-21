@@ -43,6 +43,12 @@ pub struct Journal {
     next_id: u64,
     max_passes: usize,
     max_bytes: u64,
+    /// Payloads queued by `push_pass`/eviction but not yet on disk (see
+    /// its doc comment). `flush_pending` writes them out; `save`,
+    /// `undo`, and `redo` all call it first, since none of those ever
+    /// run on the realtime audio thread.
+    pending_writes: Vec<(u64, Vec<i16>)>,
+    pending_deletes: Vec<u64>,
 }
 
 impl Journal {
@@ -56,6 +62,8 @@ impl Journal {
             next_id: 0,
             max_passes: DEFAULT_MAX_PASSES,
             max_bytes: DEFAULT_MAX_BYTES,
+            pending_writes: Vec::new(),
+            pending_deletes: Vec::new(),
         })
     }
 
@@ -81,19 +89,14 @@ impl Journal {
         self.dir.join(format!("pass-{id:04}.bin"))
     }
 
-    fn write_payload(&self, id: u64, data: &[i16]) -> Result<String, UndoError> {
-        let path = self.path_for(id);
-        let mut f = fs::File::create(&path)?;
+    fn write_payload(&self, id: u64, data: &[i16]) -> Result<(), UndoError> {
+        let mut f = fs::File::create(self.path_for(id))?;
         let mut bytes = Vec::with_capacity(data.len() * 2);
         for &s in data {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
         f.write_all(&bytes)?;
-        Ok(path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string())
+        Ok(())
     }
 
     fn read_payload(&self, entry: &Entry) -> Result<Vec<i16>, UndoError> {
@@ -106,64 +109,107 @@ impl Journal {
             .collect())
     }
 
-    /// Record a completed pass. Clears the redo stack, as any new take
-    /// invalidates the branch that was undone.
-    pub fn push_pass(&mut self, pass: &RecordPass) -> Result<(), UndoError> {
+    /// Record a completed pass. Does no I/O and cannot fail - the
+    /// payload is kept in memory and its disk write deferred to
+    /// `flush_pending`, so this is safe to call from the realtime audio
+    /// thread (REQ-902). Clears the redo stack, as any new take
+    /// invalidates the branch that was undone; those payloads are
+    /// dropped from `pending_writes` if never flushed, or queued for
+    /// deletion if they already made it to disk.
+    pub fn push_pass(&mut self, pass: RecordPass) {
         for e in self.redo.drain(..) {
-            let _ = fs::remove_file(self.dir.join(&e.file));
+            if self.pending_writes.iter().any(|(id, _)| *id == e.id) {
+                self.pending_writes.retain(|(id, _)| *id != e.id);
+            } else {
+                self.pending_deletes.push(e.id);
+            }
         }
         if pass.is_empty() {
-            return Ok(());
+            return;
         }
         let id = self.next_id;
         self.next_id += 1;
-        let file = self.write_payload(id, &pass.displaced)?;
+        let file = self
+            .path_for(id)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let len = pass.displaced.len();
+        self.pending_writes.push((id, pass.displaced));
         self.undo.push(Entry {
             id,
             track: pass.track,
             start: pass.start,
-            len: pass.displaced.len(),
+            len,
             file,
         });
-        self.evict()?;
-        Ok(())
+        self.evict();
     }
 
-    /// Oldest-first eviction once either cap is exceeded.
-    fn evict(&mut self) -> Result<(), UndoError> {
+    /// Oldest-first eviction once either cap is exceeded. Deferred like
+    /// `push_pass` - no I/O here either.
+    fn evict(&mut self) {
         let mut total: u64 = self.undo.iter().map(Entry::bytes).sum();
         while self.undo.len() > self.max_passes || (total > self.max_bytes && self.undo.len() > 1) {
             let e = self.undo.remove(0);
             total -= e.bytes();
-            let _ = fs::remove_file(self.dir.join(&e.file));
+            if self.pending_writes.iter().any(|(id, _)| *id == e.id) {
+                self.pending_writes.retain(|(id, _)| *id != e.id);
+            } else {
+                self.pending_deletes.push(e.id);
+            }
+        }
+    }
+
+    /// Write out everything queued by `push_pass`/eviction since the
+    /// last flush. Real disk I/O - never call this from the realtime
+    /// callback. `save`, `undo`, and `redo` call it first so a payload
+    /// is always readable regardless of whether it happened to be
+    /// flushed yet.
+    pub fn flush_pending(&mut self) -> Result<(), UndoError> {
+        for id in std::mem::take(&mut self.pending_deletes) {
+            let _ = fs::remove_file(self.path_for(id));
+        }
+        for (id, samples) in std::mem::take(&mut self.pending_writes) {
+            self.write_payload(id, &samples)?;
         }
         Ok(())
     }
 
     pub fn undo(&mut self, tape: &mut Tape) -> Result<(), UndoError> {
+        // Never called from the realtime thread (Undo is a blocking
+        // command), so flushing here is safe and keeps the guarantee
+        // that a payload is always readable regardless of whether
+        // push_pass happened to flush it yet.
+        self.flush_pending()?;
         let entry = self.undo.pop().ok_or(UndoError::Empty("undo"))?;
         let payload = self.read_payload(&entry)?;
         let mut current = vec![0i16; entry.len];
         tape.read_raw(entry.track, entry.start, &mut current);
         tape.write_raw(entry.track, entry.start, &payload);
-        let file = self.write_payload(entry.id, &current)?;
-        self.redo.push(Entry { file, ..entry });
+        self.write_payload(entry.id, &current)?;
+        self.redo.push(entry);
         Ok(())
     }
 
     pub fn redo(&mut self, tape: &mut Tape) -> Result<(), UndoError> {
+        self.flush_pending()?;
         let entry = self.redo.pop().ok_or(UndoError::Empty("redo"))?;
         let payload = self.read_payload(&entry)?;
         let mut current = vec![0i16; entry.len];
         tape.read_raw(entry.track, entry.start, &mut current);
         tape.write_raw(entry.track, entry.start, &payload);
-        let file = self.write_payload(entry.id, &current)?;
-        self.undo.push(Entry { file, ..entry });
+        self.write_payload(entry.id, &current)?;
+        self.undo.push(entry);
         Ok(())
     }
 
-    /// Persist stack metadata so undo survives restart (REQ-503).
-    pub fn save(&self) -> Result<(), UndoError> {
+    /// Persist stack metadata so undo survives restart (REQ-503). Also
+    /// flushes any pending payloads first, so "saved" really means
+    /// everything is on disk.
+    pub fn save(&mut self) -> Result<(), UndoError> {
+        self.flush_pending()?;
         let state = JournalState {
             undo: self.undo.clone(),
             redo: self.redo.clone(),
@@ -240,11 +286,11 @@ mod tests {
         let mut j = Journal::new(&dir.0).unwrap();
 
         let p0 = record(&mut tape, 0, 0, 220.0, 30_000);
-        j.push_pass(&p0).unwrap();
+        j.push_pass(p0);
         let after_first = snapshot(&tape, 0, 48_000);
 
         let p1 = record(&mut tape, 0, 5000, 1100.0, 10_000);
-        j.push_pass(&p1).unwrap();
+        j.push_pass(p1);
         let after_second = snapshot(&tape, 0, 48_000);
         assert_ne!(after_first, after_second);
 
@@ -272,12 +318,12 @@ mod tests {
         let mut j = Journal::new(&dir.0).unwrap();
 
         let p0 = record(&mut tape, 1, 0, 220.0, 10_000);
-        j.push_pass(&p0).unwrap();
+        j.push_pass(p0);
         j.undo(&mut tape).unwrap();
         assert!(j.can_redo());
 
         let p1 = record(&mut tape, 1, 0, 660.0, 10_000);
-        j.push_pass(&p1).unwrap();
+        j.push_pass(p1);
         assert!(!j.can_redo(), "new take must invalidate the redo branch");
     }
 
@@ -288,7 +334,7 @@ mod tests {
         let mut j = Journal::new(&dir.0).unwrap().with_caps(3, u64::MAX);
         for i in 0..6 {
             let p = record(&mut tape, 2, i * 1000, 300.0 + i as f32 * 50.0, 2000);
-            j.push_pass(&p).unwrap();
+            j.push_pass(p);
         }
         assert_eq!(j.depth(), 3, "oldest passes evicted");
 
@@ -296,7 +342,7 @@ mod tests {
         let mut j2 = Journal::new(&dir.0).unwrap().with_caps(100, 8000);
         for i in 0..5 {
             let p = record(&mut tape, 3, i * 1000, 400.0, 2000);
-            j2.push_pass(&p).unwrap();
+            j2.push_pass(p);
         }
         assert!(
             j2.depth() <= 2,
@@ -310,7 +356,7 @@ mod tests {
         let dir = TempDir::new("empty");
         let mut j = Journal::new(&dir.0).unwrap();
         let p = RecordPass::new(0, 0, 1);
-        j.push_pass(&p).unwrap();
+        j.push_pass(p);
         assert_eq!(j.depth(), 0);
     }
 
@@ -322,10 +368,10 @@ mod tests {
         {
             let mut j = Journal::new(&dir.0).unwrap();
             let p0 = record(&mut tape, 0, 0, 220.0, 20_000);
-            j.push_pass(&p0).unwrap();
+            j.push_pass(p0);
             baseline = snapshot(&tape, 0, 48_000);
             let p1 = record(&mut tape, 0, 4000, 990.0, 6000);
-            j.push_pass(&p1).unwrap();
+            j.push_pass(p1);
             j.save().unwrap();
         }
         let mut reloaded = Journal::load(&dir.0).unwrap();

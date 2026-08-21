@@ -211,13 +211,17 @@ impl Engine {
     }
 
     /// Close any open passes, applying punch-out fades and journaling.
+    /// Reachable from process_block itself (transport hitting the tape
+    /// end while recording) as well as Stop/Play, all of which the
+    /// realtime adapter runs directly on the audio callback - so this
+    /// must never touch disk. Journal::push_pass only does in-memory
+    /// bookkeeping; the actual write is deferred until save/undo/redo,
+    /// which are always run off the realtime thread (REQ-902).
     fn close_passes(&mut self) {
         for t in 0..NUM_TRACKS {
             if let Some(mut pass) = self.passes[t].take() {
                 pass.finish(&mut self.tape);
-                // Journal writes are control-path only, never in
-                // process_block, so disk I/O here is fine.
-                let _ = self.journal.push_pass(&pass);
+                self.journal.push_pass(pass);
             }
         }
     }
@@ -487,5 +491,43 @@ mod tests {
             rms_dbfs(&played)
         );
         assert!(e.can_undo(), "undo journal survived reload");
+    }
+
+    /// REQ-902 regression (M4.4): Stop, and process_block's own
+    /// auto-stop at the tape end, run on the realtime audio thread and
+    /// must never touch disk. The pass payload should stay in memory
+    /// until something that always runs off that thread - save, here -
+    /// flushes it.
+    #[test]
+    fn stop_does_not_write_the_journal_payload_until_save() {
+        let dir = TempDir::new("deferred-journal");
+        let mut e = Engine::create_with_character(&dir.0, 96_000, TapeCharacter::clean()).unwrap();
+        e.set_armed(0, true);
+        e.record();
+        run(&mut e, 0, &sine(440.0, -6.0, 10_000), 512);
+        e.stop();
+
+        assert!(e.can_undo(), "entry recorded in memory");
+        let undo_dir = dir.0.join("undo");
+        assert!(
+            !has_pass_payload(&undo_dir),
+            "stop must not write the pass payload to disk"
+        );
+
+        e.save().unwrap();
+        assert!(
+            has_pass_payload(&undo_dir),
+            "save must flush the deferred pass payload"
+        );
+    }
+
+    fn has_pass_payload(undo_dir: &std::path::Path) -> bool {
+        std::fs::read_dir(undo_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().starts_with("pass-"))
+            })
+            .unwrap_or(false)
     }
 }
