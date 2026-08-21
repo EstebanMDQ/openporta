@@ -1,7 +1,12 @@
-# Pi setup: kiosk auto-launch (M6.3)
+# Pi setup: kiosk auto-launch and a taskbar launcher (M6.3)
 
-Boots the Pi's desktop straight into openporta, full-screen, no window
-chrome, instead of a manual launch every time.
+Two independent, complementary pieces:
+
+- Boots the Pi's desktop straight into openporta, full-screen, no
+  window chrome, instead of a manual launch every time.
+- A pinned icon on the panel/taskbar to (re)launch it manually,
+  windowed - e.g. after killing the kiosk instance to test something,
+  or on a machine that isn't set to auto-launch at all.
 
 ## Assumed layout
 
@@ -36,6 +41,43 @@ autostart runner doesn't honor the latter) gives the panel and
 PipeWire time to finish coming up first.
 
 [xdg-autostart]: https://specifications.freedesktop.org/autostart-spec/autostart-spec-latest.html
+
+## Taskbar launcher
+
+wf-panel-pi (the Pi's own panel) pins launchers by listing `.desktop`
+files in `~/.config/wf-panel-pi.ini`'s `[panel]` section
+(`launcher_000001=...`, `launcher_000002=...`, ...) - each name is
+resolved the standard way, against `~/.local/share/applications/` and
+`/usr/share/applications/`. Same additive, per-user, no-`sudo`
+approach as the autostart entry:
+
+```bash
+mkdir -p ~/.local/share/applications
+cp deploy/openporta-launcher.desktop ~/.local/share/applications/openporta.desktop
+```
+
+Then add one line to the `[panel]` section of
+`~/.config/wf-panel-pi.ini`, picking the next unused
+`launcher_NNNNNN` number (they don't have to be contiguous, just
+distinct):
+
+```ini
+launcher_000004=openporta.desktop
+```
+
+wf-panel-pi only reads its config at startup, so it needs to restart
+to pick up the change - it runs supervised by `lwrespawn` (see
+`/etc/xdg/labwc/autostart`), which relaunches it automatically the
+moment it exits:
+
+```bash
+pkill wf-panel-pi
+```
+
+This one launches windowed (no `--kiosk`) - a manual launcher is more
+useful when it can still see and reach the rest of the desktop, unlike
+the autostart entry above whose whole point is to take over the
+screen.
 
 ## Getting out of kiosk mode
 
