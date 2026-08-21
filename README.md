@@ -28,7 +28,9 @@ counts, non-destructive editing. See `openspec/spec.md`.
 
 ## Status
 
-The engine is complete and headlessly tested. The UI is not built yet.
+The engine is complete and headlessly tested. The Slint UI drives it
+through the command queue, with a silent timer standing in for the
+audio thread until the realtime adapter is wired into it (M5.5).
 
 | Milestone | State |
 |-----------|-------|
@@ -36,12 +38,12 @@ The engine is complete and headlessly tested. The UI is not built yet.
 | M1 tape engine: transport, record, punch, undo, persistence | done |
 | M2 lo-fi DSP and generation loss | done |
 | M3 bounce, mixdown, WAV export, CLI | done |
-| M4 realtime audio (cpal) | written, needs a hardware session |
-| M5 Slint UI | not started |
+| M4 realtime audio (cpal) | verified on macOS hardware |
+| M5 Slint UI: transport, track strips, meters, save/undo/export, cassette new/load | done; real audio in the UI is M5.5 |
 | M6 Raspberry Pi deployment | not started |
 
-Today you drive it through session scripts and the CLI. `TASKS.md` is
-the queue.
+Today you drive it through session scripts, the CLI, or the UI.
+`TASKS.md` is the queue.
 
 ## Try it
 
@@ -83,6 +85,19 @@ With real audio hardware:
 cargo run -p porta-app --features realtime -- devices
 cargo run -p porta-app --features realtime -- live mytape.porta --period 256
 ```
+
+The Slint UI (no real audio yet - see Status above):
+
+```bash
+cargo run -p porta-app --features ui -- ui mytape.porta
+```
+
+## Releases
+
+Tagged releases (`vX.Y.Z`) build `porta-app` for macOS (Apple Silicon
+and Intel), Linux (x86_64 and aarch64), and Windows, with both the
+`realtime` and `ui` features on - see the Actions tab, or
+`.github/workflows/release.yml`.
 
 ## Layout
 

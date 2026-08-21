@@ -1,0 +1,145 @@
+name: Release
+
+# Cuts a GitHub Release with prebuilt porta-app binaries for macOS
+# (Apple Silicon + Intel), Linux (x86_64 + aarch64, the latter on a
+# genuine ARM runner), and Windows - all with the full `realtime,ui`
+# feature set, the same combination verified to build together in
+# TASKS.md. The aarch64 Linux build doubles as a real per-commit signal
+# for M6's Pi deployment, short of the actual hardware.
+#
+# To cut a release: bump `workspace.package.version` in Cargo.toml,
+# commit, then `git tag vX.Y.Z && git push origin vX.Y.Z`. Pushing the
+# tag is what triggers publishing; workflow_dispatch runs the same
+# matrix without publishing, for testing the build side alone.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Never publish a build that didn't pass the project's own gate.
+  gate:
+    name: Full test gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  build:
+    name: ${{ matrix.name }}
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            features: realtime,ui
+          - name: macos-x86_64
+            # No native Intel runner label exists anymore; Xcode's
+            # linker on Apple Silicon cross-links x86_64 fine.
+            os: macos-14
+            target: x86_64-apple-darwin
+            features: realtime,ui
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: realtime,ui
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: realtime,ui
+          - name: linux-aarch64
+            # A genuine ARM machine, not cross-compiled - same apt
+            # packages as the x86_64 job below, native arch. Doubles
+            # as a real per-commit signal for M6's Pi aarch64 build,
+            # short of the actual hardware.
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: realtime,ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux build deps (cpal + Slint)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig-dev
+
+      - run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo build --release -p porta-app --target ${{ matrix.target }} \
+              --features "${{ matrix.features }}"
+          else
+            cargo build --release -p porta-app --target ${{ matrix.target }}
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=porta-app
+          if [[ "${{ runner.os }}" == "Windows" ]]; then bin=porta-app.exe; fi
+
+          stage="openporta-${GITHUB_REF_NAME:-dev}-${{ matrix.name }}"
+          mkdir "$stage"
+          cp "target/${{ matrix.target }}/release/$bin" "$stage/"
+          cp README.md LICENSE "$stage/"
+
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            asset="$stage.zip"
+            7z a "$asset" "$stage" >/dev/null
+          else
+            asset="$stage.tar.gz"
+            tar czf "$asset" "$stage"
+          fi
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir dist
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} dist/ \;
+          ls -la dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
