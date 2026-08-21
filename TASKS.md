@@ -349,6 +349,43 @@ Verification is `cargo test --workspace` plus the noted assertions.
       needs that wired up for real, not the local Mixer peek the
       silent-timer skeleton uses today.
 
+## Release process
+
+Requested 2026-08-21 in place of front-loading M6: a way to ship
+prebuilt binaries before the Pi hands-on work, not instead of it.
+
+- [x] R1 Multi-OS release pipeline. `.github/workflows/release.yml`,
+      triggered on `v*` tags (or workflow_dispatch for a dry run that
+      builds without publishing). Builds porta-app with
+      `--features realtime,ui` for macOS (Apple Silicon native, Intel
+      cross-linked from the same Apple Silicon runner - no native
+      Intel runner label exists on GitHub-hosted runners anymore),
+      Linux x86_64, Linux aarch64 (a genuine ARM runner,
+      ubuntu-24.04-arm, not cross-compiled - doubles as a real
+      per-commit build signal for M6.1's aarch64 requirement, short of
+      the actual hardware and an on-device run), and Windows. Every
+      build job depends on the same fmt/clippy/test gate ci.yml runs -
+      nothing publishes without passing it. Packages each binary with
+      README.md and LICENSE into a tar.gz (zip on Windows), uploads as
+      a workflow artifact, and on an actual tag push attaches all of
+      them to a GitHub Release via softprops/action-gh-release.
+      Along the way: added the MIT LICENSE file the workspace's
+      Cargo.toml had been claiming (`license = "MIT"`) without actually
+      shipping since M0; updated README's status table, which still
+      said "UI not started" and M4 "needs a hardware session" - both
+      long since done.
+      To cut a release: bump `workspace.package.version` in Cargo.toml,
+      commit, `git tag vX.Y.Z && git push origin vX.Y.Z`.
+      Verified 2026-08-21 with a real workflow_dispatch dry run, not
+      just linting (actionlint on the YAML first, then the actual run -
+      cross-platform CI breaks at runtime, not parse time): gate green,
+      all 5 platform builds succeeded, publish correctly skipped (not a
+      tag push). Downloaded and inspected every artifact - correct
+      tar.gz/zip contents (binary + README + LICENSE), and the macOS
+      arm64 one is a real, correctly-architected Mach-O binary that
+      actually ran `--help` on this machine and listed both the
+      `realtime` and `ui` command sections.
+
 ## M6 - Raspberry Pi 4 deployment
 
 - [ ] M6.1 aarch64 build, cpal-ALSA, config for L6 device name, period,
