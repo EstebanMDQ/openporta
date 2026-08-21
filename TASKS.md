@@ -452,6 +452,31 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       needs to persist as real project/device config rather than being
       retyped every run, and this is the natural place to do that
       alongside device name and period.
+      On-device progress 2026-08-21, real hardware (Patchbox OS,
+      Debian 12 bookworm, glibc 2.36, PipeWire): deployed R1's fixed
+      linux-aarch64 build to `~/openporta/bin/porta-app` over ssh and
+      ran it there - `--help` and `devices` both actually execute now
+      (the earlier glibc mismatch is confirmed gone on the real
+      target, not just in CI). `devices` itself turned up a real bug:
+      the Pi's two vc4-hdmi ALSA cards fail to open with no monitor
+      attached (a completely normal headless setup), and
+      `list_devices()` used `?` on `supported_output_configs()`, so
+      the first dead HDMI output took the entire listing down with it
+      - `porta-app devices` failed outright, headphones and any USB
+      interface included. Fixed: each device gets its own `Result` now,
+      an unusable one is reported inline as `[unavailable: ...]`
+      instead of aborting the command. Verified both ways: locally
+      against real macOS devices (still lists cleanly, several
+      Pro Tools Bridge devices included) and redeployed to the Pi
+      (exit 0, full listing, HDMI entries correctly marked
+      unavailable, headphones and every ALSA plugin device listed).
+      The Zoom L6 is not currently plugged into this Pi - dmesg shows
+      it was connected earlier and cleanly recognized by
+      `snd-usb-audio` (`ZOOM Corporation L6`) before being unplugged,
+      which is a good sign for the USB-audio side, but the actual
+      device-name/period/offset smoke checklist against a live L6
+      still needs it physically reconnected - not something doable
+      over ssh.
 - [ ] M6.2 Performance pass: 128-256 frame period, callback-time
       instrumentation (verify: measured headroom documented in repo)
 - [ ] M6.3 systemd/kiosk launch, microSD save-timing check, Pi setup README
