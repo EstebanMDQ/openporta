@@ -216,18 +216,26 @@ pub fn list_devices() -> Result<Vec<String>, RealtimeError> {
     let mut out = Vec::new();
     for d in host.output_devices()? {
         let name = d.to_string();
-        let rates: Vec<String> = d
-            .supported_output_configs()?
-            .map(|c| {
-                format!(
-                    "{}-{}Hz/{}ch",
-                    c.min_sample_rate(),
-                    c.max_sample_rate(),
-                    c.channels()
-                )
-            })
-            .collect();
-        out.push(format!("output  {name} [{}]", rates.join(", ")));
+        // A device can be enumerated (it's a real ALSA card) but still
+        // fail to answer for its configs - e.g. a Pi's HDMI output with
+        // no monitor attached. That's one unusable device, not a reason
+        // to give up on listing the rest.
+        match d.supported_output_configs() {
+            Ok(configs) => {
+                let rates: Vec<String> = configs
+                    .map(|c| {
+                        format!(
+                            "{}-{}Hz/{}ch",
+                            c.min_sample_rate(),
+                            c.max_sample_rate(),
+                            c.channels()
+                        )
+                    })
+                    .collect();
+                out.push(format!("output  {name} [{}]", rates.join(", ")));
+            }
+            Err(e) => out.push(format!("output  {name} [unavailable: {e}]")),
+        }
     }
     for d in host.input_devices()? {
         out.push(format!("input   {d}"));
