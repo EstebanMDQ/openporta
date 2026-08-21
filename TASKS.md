@@ -559,6 +559,32 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       skip a duplicate that fails to open and try the next match
       rather than surfacing the first failure. Not fixed yet - flagging
       it for M6.1 proper rather than patching around it now.
+      Root-cause fix, same day: enabled cpal's `pipewire` feature
+      (target-gated to Linux inside cpal itself - confirmed a no-op on
+      macOS/Windows via a full release-matrix dry run, all 5 platforms
+      green). `default_host()` already prefers PipeWire over raw ALSA
+      when the feature's compiled in, so this needed no code changes
+      outside Cargo.toml - just `libpipewire-0.3-dev` added to
+      release.yml's Linux deps (Patchbox itself runs PipeWire 1.2.7,
+      well past cpal's >=0.3.53 floor), plus `libclang-dev` for
+      libspa-sys's bindgen step, which the bare debian:bookworm
+      container doesn't ship by default (ubuntu-latest already had it -
+      only the container leg needed the extra package).
+      Verified for real on the Pi: `devices` went from ~20 duplicate
+      `L6, USB Audio` entries to 3 clean, distinct, sensibly-named ones
+      (`L6 Analog Surround 4.0` output, `L6 Multichannel` input, plus
+      the output's own monitor). `live --in "L6 Multichannel" --out
+      "L6 Analog Surround 4.0" --in-offset 2` - the exact thing that
+      failed before - now connects, arms, records, and saves cleanly,
+      three separate runs, real non-zero samples confirmed via export
+      each time. Input startup transient shrank too (starved 1024
+      samples, ~21ms, vs ~7-8k dropped/~150ms on the old default-device
+      workaround) and is now a fixed, repeatable number across runs,
+      not just "doesn't grow with duration." One cosmetic leftover, not
+      a bug: `shutdown()` reliably prints "audio input/output error:
+      Device disconnected" once as PipeWire tears the stream down,
+      immediately followed by a normal "saved." - harmless, just noisy;
+      worth quieting later, not blocking.
 - [ ] M6.2 Performance pass: 128-256 frame period, callback-time
       instrumentation (verify: measured headroom documented in repo)
 - [ ] M6.3 systemd/kiosk launch, microSD save-timing check, Pi setup README
