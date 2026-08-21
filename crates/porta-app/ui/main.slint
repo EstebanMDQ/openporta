@@ -85,7 +85,7 @@ component TrackStrip inherits Rectangle {
 export component MainWindow inherits Window {
     title: "openporta";
     width: 560px;
-    height: 500px;
+    height: 560px;
 
     callback play-pressed();
     callback stop-pressed();
@@ -96,6 +96,8 @@ export component MainWindow inherits Window {
     callback export-pressed();
     callback new-pressed();
     callback load-pressed();
+    callback connect-pressed();
+    callback disconnect-pressed();
 
     in property <string> transport-state: "Stopped";
     in property <string> counter-text: "00:00";
@@ -107,6 +109,16 @@ export component MainWindow inherits Window {
     // The currently open cassette's directory - also where New/Load
     // read the path to act on when their buttons are pressed.
     in-out property <string> cassette-path: "";
+    // Audio connection settings: blank device names mean "system
+    // default", matching --in/--out on the live CLI. Read by Connect
+    // when pressed, not applied live - changing a setting while
+    // connected needs a fresh Connect (which disconnects first).
+    in-out property <string> input-device-text: "";
+    in-out property <string> output-device-text: "";
+    in-out property <string> period-text: "256";
+    in-out property <string> channel-offset-text: "0";
+    in property <bool> connected: false;
+    in property <string> connection-status: "not connected - silent, no real audio";
     // Punch-in/out has no dedicated UI of its own (REQ-306's crossfade
     // is baked into the engine, transport.rs): arm a track, hit Record
     // while Playing to punch in; Play again punches out and keeps
@@ -159,6 +171,42 @@ export component MainWindow inherits Window {
             }
             Button { text: "New"; clicked => { new-pressed(); } }
             Button { text: "Load"; clicked => { load-pressed(); } }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            LineEdit {
+                placeholder-text: "input (blank = default)";
+                text <=> input-device-text;
+            }
+            LineEdit {
+                placeholder-text: "output (blank = default)";
+                text <=> output-device-text;
+            }
+            LineEdit {
+                width: 60px;
+                text <=> period-text;
+            }
+            LineEdit {
+                width: 60px;
+                text <=> channel-offset-text;
+            }
+            Button {
+                text: connected ? "Disconnect" : "Connect";
+                clicked => {
+                    if (connected) {
+                        disconnect-pressed();
+                    } else {
+                        connect-pressed();
+                    }
+                }
+            }
+        }
+        Text {
+            text: connection-status;
+            horizontal-alignment: center;
+            font-size: 11px;
+            color: gray;
         }
 
         Text {

@@ -54,6 +54,55 @@ pub enum RealtimeError {
     ShutdownTimeout,
 }
 
+/// `start`'s failure. Negotiation failures (bad device name, no
+/// device, unsupported rate, ...) hand `engine` back so a failed
+/// connect attempt never silently loses whatever it held. The rare
+/// failure after engine has already moved into the output callback (an
+/// actual stream-build error, not a naming mistake) cannot recover it
+/// - cpal owns and drops the closure along with everything it captured.
+pub enum StartError {
+    // The recovered engine is only read back out by ui.rs's connect
+    // flow (M5.5) - cmd_live just wants the message. Unused, not dead,
+    // when built with realtime alone.
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
+    Negotiation(Box<Engine>, RealtimeError),
+    StreamBuild(RealtimeError),
+}
+
+impl std::fmt::Debug for StartError {
+    // Engine has no Debug impl (and printing its contents wouldn't be
+    // useful here anyway) - show the reason only.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StartError({})", self.reason())
+    }
+}
+
+impl StartError {
+    pub fn reason(&self) -> &RealtimeError {
+        match self {
+            StartError::Negotiation(_, e) | StartError::StreamBuild(e) => e,
+        }
+    }
+
+    /// The engine back, if this failure happened early enough to still
+    /// have it.
+    #[cfg_attr(not(feature = "ui"), allow(dead_code))]
+    pub fn into_engine(self) -> Option<Engine> {
+        match self {
+            StartError::Negotiation(engine, _) => Some(*engine),
+            StartError::StreamBuild(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.reason())
+    }
+}
+
+impl std::error::Error for StartError {}
+
 /// One-shot exchange used only at shutdown: the audio thread owns the
 /// engine outright for the life of the stream (REQ-902 forbids sharing
 /// it under a lock), so the only way to run a blocking command like
@@ -365,20 +414,37 @@ impl RealtimeSession {
     }
 }
 
-/// Start playback (and capture, if an input device is available).
-/// `input_name`/`output_name` are substring matches against device
-/// names; `None` means the system default. `period` is a hint - the
-/// device decides, and some hosts ignore it entirely. `channel_offset`
-/// skips that many leading input channels before assigning the rest to
-/// tracks 1..NUM_TRACKS in order - e.g. 2 on a Zoom L6, whose channels 1
-/// and 2 carry its own main mix rather than a per-track send.
-pub fn start(
-    engine: Engine,
+/// Everything `start` needs to set up before it's safe to touch the
+/// engine at all - device negotiation, config, queues, the optional
+/// input stream. Split out so a failure here (bad device name, no
+/// device found, unsupported rate, ...) never has to consume the
+/// engine to report it: `start` only moves `engine` in after this
+/// succeeds, so a failed connect attempt hands it straight back
+/// instead of silently dropping whatever it held.
+struct Negotiated {
+    output: cpal::Device,
+    out_config: StreamConfig,
+    out_channels: usize,
+    output_device: String,
+    period: usize,
+    command_tx: Producer<Command>,
+    command_rx: Consumer<Command>,
+    event_tx: Producer<EngineEvent>,
+    event_rx: Consumer<EngineEvent>,
+    xruns: Arc<Xruns>,
+    engine_handoff_audio: HandoffAudioSide<Engine>,
+    engine_handoff_control: HandoffControlSide<Engine>,
+    input_stream: Option<cpal::Stream>,
+    input_name_used: Option<String>,
+    track_capture_rx: Vec<Consumer<f32>>,
+}
+
+fn negotiate(
     input_name: Option<&str>,
     output_name: Option<&str>,
     period: Option<usize>,
     channel_offset: usize,
-) -> Result<RealtimeSession, RealtimeError> {
+) -> Result<Negotiated, RealtimeError> {
     let host = cpal::default_host();
     let output = pick(host.output_devices()?, output_name)
         .or_else(|| host.default_output_device())
@@ -394,15 +460,15 @@ pub fn start(
         buffer_size: BufferSize::Fixed(period as u32),
     };
 
-    let (command_tx, mut command_rx) = RingBuffer::<Command>::new(QUEUE);
-    let (mut event_tx, event_rx) = RingBuffer::<EngineEvent>::new(QUEUE);
+    let (command_tx, command_rx) = RingBuffer::<Command>::new(QUEUE);
+    let (event_tx, event_rx) = RingBuffer::<EngineEvent>::new(QUEUE);
     let xruns = Arc::new(Xruns::default());
 
     // Shutdown-only handoff (see HandoffAudioSide doc comment): the only
     // way anything outside the callback ever touches the engine again.
     let quit = Arc::new(AtomicBool::new(false));
     let (engine_tx, engine_rx) = RingBuffer::<Engine>::new(1);
-    let mut engine_handoff_audio = HandoffAudioSide {
+    let engine_handoff_audio = HandoffAudioSide {
         quit: Arc::clone(&quit),
         tx: engine_tx,
     };
@@ -417,7 +483,7 @@ pub fn start(
     // record silence rather than a duplicate of another track's input.
     let input_device =
         pick(host.input_devices()?, input_name).or_else(|| host.default_input_device());
-    let (input_stream, input_name_used, mut track_capture_rx) = match input_device {
+    let (input_stream, input_name_used, track_capture_rx) = match input_device {
         None => (None, None, Vec::new()),
         Some(device) => {
             let name = device.to_string();
@@ -459,6 +525,70 @@ pub fn start(
             (Some(stream), Some(name), capture_rx)
         }
     };
+
+    Ok(Negotiated {
+        output,
+        out_config,
+        out_channels,
+        output_device,
+        period,
+        command_tx,
+        command_rx,
+        event_tx,
+        event_rx,
+        xruns,
+        engine_handoff_audio,
+        engine_handoff_control,
+        input_stream,
+        input_name_used,
+        track_capture_rx,
+    })
+}
+
+/// Start playback (and capture, if an input device is available).
+/// `input_name`/`output_name` are substring matches against device
+/// names; `None` means the system default. `period` is a hint - the
+/// device decides, and some hosts ignore it entirely. `channel_offset`
+/// skips that many leading input channels before assigning the rest to
+/// tracks 1..NUM_TRACKS in order - e.g. 2 on a Zoom L6, whose channels 1
+/// and 2 carry its own main mix rather than a per-track send.
+///
+/// On failure `engine` comes back with the error rather than being
+/// dropped, so a failed connect attempt from a UI never silently loses
+/// whatever the engine held. One narrow gap remains: if the platform
+/// call inside `build_output_stream` itself fails (not device
+/// negotiation - an actual stream-build error), the engine has already
+/// moved into that closure and cpal drops it with the closure. Rare in
+/// practice; negotiation failures (bad name, no device, unsupported
+/// rate) are what a mistyped setting actually produces, and those are
+/// all caught before engine moves anywhere.
+pub fn start(
+    engine: Engine,
+    input_name: Option<&str>,
+    output_name: Option<&str>,
+    period: Option<usize>,
+    channel_offset: usize,
+) -> Result<RealtimeSession, StartError> {
+    let Negotiated {
+        output,
+        out_config,
+        out_channels,
+        output_device,
+        period,
+        command_tx,
+        mut command_rx,
+        mut event_tx,
+        event_rx,
+        xruns,
+        mut engine_handoff_audio,
+        engine_handoff_control,
+        input_stream,
+        input_name_used,
+        mut track_capture_rx,
+    } = match negotiate(input_name, output_name, period, channel_offset) {
+        Ok(n) => n,
+        Err(e) => return Err(StartError::Negotiation(Box::new(engine), e)),
+    };
     let input_tracks = track_capture_rx.len();
 
     // Everything the output callback touches is allocated here, before
@@ -470,100 +600,106 @@ pub fn start(
     let mut engine_slot = Some(engine);
     let counters = Arc::clone(&xruns);
 
-    let stream = output.build_output_stream(
-        out_config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            data.fill(0.0);
-            if engine_handoff_audio.maybe_handoff(&mut engine_slot) {
-                return;
-            }
-            let engine = engine_slot.as_mut().expect("handed off, not silenced");
-            let frames = data.len() / out_channels;
-            if frames > MAX_PERIOD {
-                // Bigger than we sized for; stay silent rather than
-                // allocate in the callback.
-                counters.output.fetch_add(1, Ordering::Relaxed);
-                let _ = event_tx.push(EngineEvent::Xrun {
-                    total: counters.output.load(Ordering::Relaxed),
-                });
-                return;
-            }
+    let stream = output
+        .build_output_stream(
+            out_config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                data.fill(0.0);
+                if engine_handoff_audio.maybe_handoff(&mut engine_slot) {
+                    return;
+                }
+                let engine = engine_slot.as_mut().expect("handed off, not silenced");
+                let frames = data.len() / out_channels;
+                if frames > MAX_PERIOD {
+                    // Bigger than we sized for; stay silent rather than
+                    // allocate in the callback.
+                    counters.output.fetch_add(1, Ordering::Relaxed);
+                    let _ = event_tx.push(EngineEvent::Xrun {
+                        total: counters.output.load(Ordering::Relaxed),
+                    });
+                    return;
+                }
 
-            let mut starved = 0u64;
-            for (t, rx) in track_capture_rx.iter_mut().enumerate() {
-                for slot in captured[t][..frames].iter_mut() {
-                    match rx.pop() {
-                        Ok(s) => *slot = s,
-                        Err(_) => {
-                            *slot = 0.0;
-                            starved += 1;
+                let mut starved = 0u64;
+                for (t, rx) in track_capture_rx.iter_mut().enumerate() {
+                    for slot in captured[t][..frames].iter_mut() {
+                        match rx.pop() {
+                            Ok(s) => *slot = s,
+                            Err(_) => {
+                                *slot = 0.0;
+                                starved += 1;
+                            }
                         }
                     }
                 }
-            }
-            for row in captured[track_capture_rx.len()..].iter_mut() {
-                // No device channel wired to this track: silence, not a
-                // duplicate of another track's input.
-                row[..frames].fill(0.0);
-            }
-            if starved > 0 {
-                counters.starved.fetch_add(starved, Ordering::Relaxed);
-            }
-
-            let mut done = 0usize;
-            while done < frames {
-                // Rule 2: one command, then process only up to the next.
-                if let Ok(cmd) = command_rx.pop() {
-                    if cmd.is_blocking() {
-                        let _ = event_tx.push(EngineEvent::Rejected(cmd));
-                    } else {
-                        let _ = porta_engine::command::apply(&mut *engine, cmd);
-                    }
+                for row in captured[track_capture_rx.len()..].iter_mut() {
+                    // No device channel wired to this track: silence, not a
+                    // duplicate of another track's input.
+                    row[..frames].fill(0.0);
+                }
+                if starved > 0 {
+                    counters.starved.fetch_add(starved, Ordering::Relaxed);
                 }
 
-                let want = frames - done;
-                let inputs: [&[f32]; NUM_TRACKS] =
-                    std::array::from_fn(|t| &captured[t][done..done + want]);
-                let n = engine.process_block(&inputs, &mut mix_l[..want], &mut mix_r[..want]);
-                if n == 0 {
-                    // Transport parked: the rest of the buffer stays
-                    // silent. Drain any remaining commands so a burst
-                    // does not trickle out one per callback.
-                    while let Ok(cmd) = command_rx.pop() {
+                let mut done = 0usize;
+                while done < frames {
+                    // Rule 2: one command, then process only up to the next.
+                    if let Ok(cmd) = command_rx.pop() {
                         if cmd.is_blocking() {
                             let _ = event_tx.push(EngineEvent::Rejected(cmd));
                         } else {
                             let _ = porta_engine::command::apply(&mut *engine, cmd);
                         }
                     }
-                    break;
-                }
-                for f in 0..n {
-                    let frame = &mut data[(done + f) * out_channels..][..out_channels];
-                    frame[0] = mix_l[f];
-                    if out_channels > 1 {
-                        frame[1] = mix_r[f];
-                    }
-                }
-                done += n;
-            }
 
-            if engine.state() != last_state {
-                last_state = engine.state();
-                let _ = event_tx.push(EngineEvent::State(last_state));
-            }
-            let _ = event_tx.push(EngineEvent::Playhead {
-                sample: engine.playhead(),
-            });
-            let _ = event_tx.push(EngineEvent::Levels {
-                tracks: std::array::from_fn(|t| engine.track_level_db(t)),
-                master: engine.master_level_db(),
-            });
-        },
-        move |err| eprintln!("audio output error: {err}"),
-        None,
-    )?;
-    stream.play()?;
+                    let want = frames - done;
+                    let inputs: [&[f32]; NUM_TRACKS] =
+                        std::array::from_fn(|t| &captured[t][done..done + want]);
+                    let n = engine.process_block(&inputs, &mut mix_l[..want], &mut mix_r[..want]);
+                    if n == 0 {
+                        // Transport parked: the rest of the buffer stays
+                        // silent. Drain any remaining commands so a burst
+                        // does not trickle out one per callback.
+                        while let Ok(cmd) = command_rx.pop() {
+                            if cmd.is_blocking() {
+                                let _ = event_tx.push(EngineEvent::Rejected(cmd));
+                            } else {
+                                let _ = porta_engine::command::apply(&mut *engine, cmd);
+                            }
+                        }
+                        break;
+                    }
+                    for f in 0..n {
+                        let frame = &mut data[(done + f) * out_channels..][..out_channels];
+                        frame[0] = mix_l[f];
+                        if out_channels > 1 {
+                            frame[1] = mix_r[f];
+                        }
+                    }
+                    done += n;
+                }
+
+                if engine.state() != last_state {
+                    last_state = engine.state();
+                    let _ = event_tx.push(EngineEvent::State(last_state));
+                }
+                let _ = event_tx.push(EngineEvent::Playhead {
+                    sample: engine.playhead(),
+                });
+                let _ = event_tx.push(EngineEvent::Levels {
+                    tracks: std::array::from_fn(|t| engine.track_level_db(t)),
+                    master: engine.master_level_db(),
+                });
+            },
+            move |err| eprintln!("audio output error: {err}"),
+            None,
+        )
+        // engine already moved into the closure above - can't hand it back
+        // from here on, whichever of these two calls fails.
+        .map_err(|e| StartError::StreamBuild(RealtimeError::from(e)))?;
+    stream
+        .play()
+        .map_err(|e| StartError::StreamBuild(RealtimeError::from(e)))?;
 
     Ok(RealtimeSession {
         _input: input_stream,

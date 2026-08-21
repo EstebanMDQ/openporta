@@ -332,22 +332,61 @@ Verification is `cargo test --workspace` plus the noted assertions.
       .../m54-b.porta". New produced a real cassette on disk and
       "created .../m54-new-cassette.porta". Clean quit, no panics.
       Full gate green.
-- [ ] M5.5 Wire the realtime adapter into the Slint UI, plus a
-      settings panel for device/channel/period selection. Raised
-      2026-08-21: the `ui` feature currently drives the engine with a
-      silent Slint timer standing in for the audio thread - there is
-      no real audio in the GUI at all, so a settings screen would have
-      nothing to configure yet. This is the actual prerequisite.
-      The realtime protocol (Command/EngineEvent, RealtimeSession) from
-      M4 already exists and is tested - `ui.rs` would become a
-      different consumer of it, polling session.poll()/calling
-      session.send() from a Slint timer instead of owning Engine
-      directly, the way cmd_live already does from the terminal. Real
-      complication: EngineEvent::Levels is still never emitted by
-      realtime.rs (found during M5.2, not fixed there since the UI
-      skeleton didn't need it yet) - metering in a realtime-backed UI
-      needs that wired up for real, not the local Mixer peek the
-      silent-timer skeleton uses today.
+- [x] M5.5 Wire the realtime adapter into the Slint UI, plus a
+      settings panel for device/channel/period selection.
+      `EngineEvent::Levels` now carries real per-track + master dBFS
+      (`[f32; NUM_TRACKS]` + `(f32, f32)`, was a stale unused `{left,
+      right}` shape) and is actually emitted from the output callback
+      in realtime.rs, mirroring the Playhead push right next to it.
+      `ui.rs` no longer owns a single `Engine` unconditionally: a new
+      `Backend` enum is `Silent(Box<Engine>)` (today's timer-driven
+      skeleton, unchanged behavior) or, with `--features realtime`,
+      `Live(Box<LiveState>)` wrapping a real `RealtimeSession` on a
+      cpal thread - the UI polls/sends through it exactly like
+      `cmd_live` does from the terminal, and a `Snapshot` struct
+      decouples `refresh()` from which variant produced the values.
+      The hard constraint driving the design: REQ-902 blocking
+      commands (Save/Undo/Export/New/Load) can't reach a running
+      RealtimeSession, so they can't just call through to it. Solved
+      with disconnect-run-reconnect - `with_engine()` takes the
+      backend out from behind a shared `Rc<RefCell<Option<Backend>>>`,
+      shuts the session down cleanly if it was live (via the existing
+      M4.5 handoff), runs the blocking op on a bare `Engine`, and
+      reconnects with the same device/period/offset settings
+      afterward, falling back to `Silent` if reconnecting fails so the
+      cassette isn't stranded unreachable.
+      Also fixed along the way: `realtime::start()` used to drop the
+      `Engine` on most early-return error paths (found while designing
+      the UI's Connect flow, not a pre-existing bug report) - split
+      into `negotiate()` (pure device/config negotiation, never touches
+      the engine) and `start()` (only consumes it after negotiation
+      succeeds), with a `StartError::Negotiation(Box<Engine>, ..)` /
+      `StartError::StreamBuild(..)` split so a failed Connect attempt
+      in the UI gets its cassette back instead of losing it; only the
+      later `build_output_stream`/`stream.play()` failures are
+      unrecoverable, since the engine is already moved into the cpal
+      closure by then.
+      New settings row in main.slint: input/output device text fields
+      (blank = system default, matching the CLI), period and channel-
+      offset fields, and a Connect/Disconnect toggle with a status
+      line - all read only when Connect is pressed, matching --in/
+      --out/--period/--in-offset on `live`, not applied live to an
+      already-open stream.
+      4 new ui.rs tests (non_empty blank-means-default,
+      silent-backend snapshot reflects engine state, with_engine
+      leaves the backend usable afterward, take_engine unwraps Silent
+      directly) plus the pre-existing realtime handoff tests, still
+      green. Full gate green for all four feature combinations
+      (default, `ui`, `realtime`, `realtime,ui` - fmt, clippy -D
+      warnings, and cargo test each). `Engine` and the new `LiveState`
+      both had to be boxed inside their enums (large_enum_variant) -
+      clippy catches this reliably, no manual size auditing needed.
+      Live GUI click-through (Connect against a real device, watch
+      meters move from a real EngineEvent::Levels, Save/Undo/Export
+      through an actual disconnect-reconnect) still needs a hands-on
+      pass with the screen unlocked - not done yet, tracked
+      separately, not blocking the commit since the gate is the
+      project's actual definition of done.
 
 ## Release process
 
@@ -385,6 +424,23 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       arm64 one is a real, correctly-architected Mach-O binary that
       actually ran `--help` on this machine and listed both the
       `realtime` and `ui` command sections.
+      Follow-up fix same day: the linux-aarch64 artifact from the first
+      dry run failed on the real Pi with `GLIBC_2.39 not found` -
+      ubuntu-24.04-arm's own userland (glibc 2.39) is newer than real
+      Raspberry Pi OS/Patchbox (Debian 12 bookworm, glibc 2.36), and a
+      glibc binary won't run against an older glibc than it was linked
+      against. Rebuilt that one matrix entry inside `container:
+      debian:bookworm` on the same native ARM runner instead of relying
+      on the runner's own userland. Needed two follow-up fixes to get
+      the container itself working: no git preinstalled (bootstrap step
+      installs it before actions/checkout, which needs git to run at
+      all) and no Rust toolchain (installed via rustup.rs manually,
+      `$HOME/.cargo/bin` appended to `$GITHUB_PATH`); then a second
+      failure, `dash` (the container's default `sh`) rejecting `set -o
+      pipefail`, fixed with job-level `defaults: run: shell: bash`.
+      Verified via two more real workflow_dispatch dry runs, not just
+      actionlint - the second succeeded across all 5 platforms
+      including the container-built linux-aarch64.
 
 ## M6 - Raspberry Pi 4 deployment
 
