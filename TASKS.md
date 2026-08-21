@@ -308,9 +308,10 @@ Verification is `cargo test --workspace` plus the noted assertions.
       correctness bug). Clean quit, no panics. Full gate green.
 - [ ] M5.4 Cassette new/load from within a running UI (needs the
       Engine swapped at runtime, not just more buttons - see M5.3).
-      Default export path should probably resolve relative to the
-      cassette directory, not the process's cwd (found during M5.3's
-      manual verification).
+      Export path default fixed same day: now `<cassette-dir>/
+      export.wav` via a new default_export_path helper (tested), not
+      whatever the process's cwd happened to be. New/load itself still
+      not done.
 
 ## M6 - Raspberry Pi 4 deployment
 

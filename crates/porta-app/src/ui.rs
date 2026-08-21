@@ -80,6 +80,9 @@ pub fn run(dir: &str) -> Result<(), String> {
     let engine = Rc::new(RefCell::new(Engine::open(dir).map_err(|e| e.to_string())?));
     let ui = MainWindow::new().map_err(|e| e.to_string())?;
     refresh(&ui, &engine.borrow());
+    // Default export path resolves against the cassette, not whatever
+    // directory the process happened to be launched from.
+    ui.set_export_path(default_export_path(dir).into());
 
     connect_transport(&ui, &engine);
     wire_track!(
@@ -269,6 +272,15 @@ fn status_message(action: &str, result: Result<(), porta_engine::engine::EngineE
     }
 }
 
+/// A sensible default export target: next to the cassette, not
+/// wherever the process's cwd happened to be.
+fn default_export_path(cassette_dir: &str) -> String {
+    std::path::Path::new(cassette_dir)
+        .join("export.wav")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Export the whole tape from the top as a 16-bit WAV. Only ever runs
 /// on the UI thread from a button press, never the timer - no REQ-902
 /// concern the way the realtime callback has.
@@ -317,6 +329,18 @@ mod tests {
         assert_eq!(
             status_message("save", err),
             "save failed: save is only allowed while stopped"
+        );
+    }
+
+    #[test]
+    fn default_export_path_resolves_against_the_cassette() {
+        assert_eq!(
+            default_export_path("/Users/me/takes/song.porta"),
+            "/Users/me/takes/song.porta/export.wav"
+        );
+        assert_eq!(
+            default_export_path("relative/dir"),
+            "relative/dir/export.wav"
         );
     }
 
