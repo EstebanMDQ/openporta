@@ -15,9 +15,12 @@ an audio device):
 cargo run -p porta-app --features realtime -- devices
 ```
 
-- [ ] `devices` lists the built-in output and the Zoom L6 when it is
+- [x] `devices` lists the built-in output and the Zoom L6 when it is
       plugged in, and shows a 48000 Hz range for each.
-- [ ] The L6 appears as an input too, with the channel count you expect.
+- [x] The L6 appears as an input too, with the channel count you expect
+      (12 channels over USB - see `probe` and the M4.6 note below;
+      "the channel count you expect" took a probe session to establish,
+      it isn't obvious from the L6 alone).
 
 Make a cassette and drive it live:
 
@@ -37,16 +40,22 @@ fast-forward, `q` quit.
 
 - [ ] Playback of a blank tape is silent, with no clicks, pops, or
       periodic ticking.
-- [ ] Arm track 1, record something, stop, rewind, play: the take is
+- [x] Arm track 1, record something, stop, rewind, play: the take is
       there, at the right speed and pitch.
-- [ ] While recording, what you hear is the processed signal (the tape
+- [x] While recording, what you hear is the processed signal (the tape
       character audible on the way in), not the dry input (REQ-305).
 - [ ] Punch in over an existing take: no click at either boundary.
+      Punching in works mechanically (confirmed 2026-08-20); click
+      quality at the boundary not yet confirmed either way.
 - [ ] `q` prints an xrun summary. On the MacBook it should be all
-      zeros at `--period 256`.
-- [ ] Try `--period 128` and `--period 64`. Note the lowest period that
-      still gives zero xruns over a two-minute run, and record it below.
-- [ ] Unplug the interface while running: the app reports an error
+      zeros at `--period 256`. **Currently fails**: `audio input
+      error`/`audio output error` (a real CoreAudio xrun) reliably
+      prints right after `s`, at every period tried - this is M4.4, see
+      below. Recheck this box once M4.4 lands.
+- [ ] Try `--period 128` and `--period 64`. Both ran (2026-08-20); the
+      specific lowest clean-during-playback period hasn't been pinned
+      down yet - fill in below once it has.
+- [x] Unplug the interface while running: the app reports an error
       rather than hanging or crashing hard.
 
 Cross-check against the headless renderer:
@@ -60,20 +69,22 @@ Findings (fill in):
 - Notes: cpal 0.16.0's macOS device enumeration segfaulted reliably on
   `devices` (UB from a non-mut out-param in coreaudio device listing);
   fixed by bumping to cpal 0.18. Separately, going record -> stop
-  reliably logged a CoreAudio buffer overrun at --period 256, not
+  reliably logged a CoreAudio buffer overrun at every period tried, not
   reflected in the app's own xrun counters - root cause is a disk write
   and allocation reachable from `Command::Stop` inside the realtime
-  callback (REQ-902 violation), tracked as M4.4 in TASKS.md. Re-run the
-  period/xrun steps above once M4.4 lands. Also found: `live` never
-  persisted anything (no Save path reachable from the audio thread) -
-  fixed as M4.5, verified on the L6 (record, quit, saw "saved.", fresh
-  render showed the take). Also found: input capture only ever opened 1
-  channel and broadcast it to all 4 tracks regardless of which was
-  armed, and on the L6 that one channel wasn't even a per-track send -
-  fixed as M4.6 (`--in-offset` flag, one ring per track) along with an
-  arm/disarm toggle (previously arm-only). Re-run the steps above with
-  `--in-offset 2` to confirm each track actually captures its own L6
-  channel.
+  callback (REQ-902 violation), tracked as M4.4 in TASKS.md, still
+  open. Also found: `live` never persisted anything (no Save path
+  reachable from the audio thread) - fixed as M4.5, verified on the L6
+  (record, quit, saw "saved.", fresh render showed the take). Also
+  found: input capture only ever opened 1 channel and broadcast it to
+  all 4 tracks regardless of which was armed, and on the L6 that one
+  channel wasn't even a per-track send - fixed as M4.6 (`--in-offset`
+  flag, one ring per track, `probe` subcommand for finding the real
+  channel mapping) along with an arm/disarm toggle (previously
+  arm-only) and a `0` seek-to-start key ([/] only ever nudge by 1s).
+  L6 exposes 12 channels over USB, not 6; decided 2026-08-20 to use
+  channels 3-6 for the four tracks (`--in-offset 2`), confirmed
+  working end to end including punch-in.
 
 ## M5 - UI
 
