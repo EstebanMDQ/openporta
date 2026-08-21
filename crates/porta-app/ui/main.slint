@@ -8,7 +8,7 @@ import { Button, Slider, LineEdit, ScrollView } from "std-widgets.slint";
 component MeterBar inherits Rectangle {
     in property <float> level-fraction: 0;
     width: 14px;
-    height: 70px;
+    height: 44px;
     background: #222;
     border-radius: 2px;
 
@@ -38,14 +38,14 @@ component TrackStrip inherits Rectangle {
     border-radius: 6px;
 
     VerticalLayout {
-        padding: 8px;
-        spacing: 6px;
+        padding: 5px;
+        spacing: 3px;
         alignment: start;
 
         Text {
             text: "Track " + track-label;
             horizontal-alignment: center;
-            font-size: 12px;
+            font-size: 11px;
         }
         Button {
             text: armed ? "ARMED" : "arm";
@@ -58,7 +58,7 @@ component TrackStrip inherits Rectangle {
         Text {
             text: "fader";
             horizontal-alignment: center;
-            font-size: 10px;
+            font-size: 8px;
             color: gray;
         }
         Slider {
@@ -70,7 +70,7 @@ component TrackStrip inherits Rectangle {
         Text {
             text: "pan";
             horizontal-alignment: center;
-            font-size: 10px;
+            font-size: 8px;
             color: gray;
         }
         Slider {
@@ -89,17 +89,28 @@ export component MainWindow inherits Window {
     // a fixed size and maximize becomes a no-op. min-* keeps a maximized
     // or shrunk window from squeezing the track strips unreadably thin.
     // preferred-height targets the Pi kiosk display (800x480 native,
-    // panel chrome eats some of that) rather than the full ~600px the
-    // content needs - the ScrollView below covers the rest so nothing
-    // is genuinely unreachable, on that screen or a smaller one.
+    // confirmed on-device via wlr-randr) rather than a desktop-sized
+    // window; the ScrollView below covers anything still too tall to
+    // fit, on that screen or a smaller one.
     preferred-width: 560px;
-    preferred-height: 440px;
+    preferred-height: 460px;
     min-width: 480px;
     min-height: 280px;
+    // Driven by `--kiosk` on the CLI (default false, so a plain
+    // desktop launch stays a normal resizable/movable window). Both
+    // are built-in Window properties - full-screen also respects the
+    // SLINT_FULLSCREEN env var on its own, no-frame is winit-only.
+    in property <bool> kiosk-mode: false;
+    full-screen: kiosk-mode;
+    no-frame: kiosk-mode;
 
     callback play-pressed();
     callback stop-pressed();
     callback record-pressed();
+    callback seek-start-pressed();
+    callback seek-end-pressed();
+    callback rewind-pressed();
+    callback fast-forward-pressed();
     callback master-fader-changed(float);
     callback save-pressed();
     callback undo-pressed();
@@ -171,7 +182,7 @@ export component MainWindow inherits Window {
     callback track4-pan-changed <=> track4.pan-changed;
 
     // Scrollable so the full layout stays reachable on a short window
-    // (an 800x600 kiosk display, or this window shrunk/maximized to
+    // (an 800x480 kiosk display, or this window shrunk/maximized to
     // something the content doesn't natively fit) instead of clipping
     // silently off the bottom edge.
     ScrollView {
@@ -179,8 +190,8 @@ export component MainWindow inherits Window {
         height: 100%;
 
         VerticalLayout {
-            padding: 16px;
-            spacing: 12px;
+            padding: 8px;
+            spacing: 6px;
 
             HorizontalLayout {
                 spacing: 8px;
@@ -223,26 +234,35 @@ export component MainWindow inherits Window {
             Text {
                 text: connection-status;
                 horizontal-alignment: center;
-                font-size: 11px;
+                font-size: 9px;
                 color: gray;
             }
 
-            Text {
-                text: counter-text;
-                font-size: 30px;
-                horizontal-alignment: center;
-            }
-            Text {
-                text: transport-state;
-                horizontal-alignment: center;
-                color: gray;
+            HorizontalLayout {
+                alignment: center;
+                spacing: 10px;
+                Text {
+                    text: counter-text;
+                    font-size: 20px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: transport-state;
+                    font-size: 13px;
+                    color: gray;
+                    vertical-alignment: center;
+                }
             }
             HorizontalLayout {
-                spacing: 10px;
+                spacing: 6px;
                 alignment: center;
+                Button { text: "|<"; clicked => { seek-start-pressed(); } }
+                Button { text: "<<"; clicked => { rewind-pressed(); } }
                 Button { text: "Play"; clicked => { play-pressed(); } }
                 Button { text: "Stop"; clicked => { stop-pressed(); } }
                 Button { text: "Record"; clicked => { record-pressed(); } }
+                Button { text: ">>"; clicked => { fast-forward-pressed(); } }
+                Button { text: ">|"; clicked => { seek-end-pressed(); } }
             }
 
             HorizontalLayout {
@@ -260,14 +280,14 @@ export component MainWindow inherits Window {
                     border-radius: 6px;
 
                     VerticalLayout {
-                        padding: 8px;
-                        spacing: 6px;
+                        padding: 5px;
+                        spacing: 3px;
                         alignment: start;
 
                         Text {
                             text: "Master";
                             horizontal-alignment: center;
-                            font-size: 12px;
+                            font-size: 11px;
                         }
                         HorizontalLayout {
                             spacing: 4px;
@@ -278,7 +298,7 @@ export component MainWindow inherits Window {
                         Text {
                             text: "master";
                             horizontal-alignment: center;
-                            font-size: 10px;
+                            font-size: 8px;
                             color: gray;
                         }
                         Slider {
@@ -301,7 +321,7 @@ export component MainWindow inherits Window {
                     clicked => { undo-pressed(); }
                 }
                 LineEdit {
-                    width: 160px;
+                    width: 140px;
                     text <=> export-path;
                 }
                 Button { text: "Export WAV"; clicked => { export-pressed(); } }
@@ -309,7 +329,7 @@ export component MainWindow inherits Window {
             Text {
                 text: status-text;
                 horizontal-alignment: center;
-                font-size: 11px;
+                font-size: 10px;
                 color: gray;
             }
         }

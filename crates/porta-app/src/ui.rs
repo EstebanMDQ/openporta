@@ -51,6 +51,10 @@ use std::time::Duration;
 const TICK: Duration = Duration::from_millis(20);
 const TICK_SAMPLES: usize = (porta_engine::SAMPLE_RATE as usize * 20) / 1000;
 
+/// How far a single rewind/fast-forward button press moves the
+/// playhead. Matches the `[`/`]` keys in `cmd_live`.
+const SEEK_STEP_SAMPLES: usize = porta_engine::SAMPLE_RATE as usize;
+
 /// Meter window: -60dB reads as an empty bar, 0dB (or hotter) as full.
 /// A convention, not a spec requirement - matches common VU meters.
 const METER_FLOOR_DB: f32 = -60.0;
@@ -415,11 +419,12 @@ macro_rules! wire_track {
     }};
 }
 
-pub fn run(dir: &str) -> Result<(), String> {
+pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
     let backend: Rc<RefCell<Option<Backend>>> = Rc::new(RefCell::new(Some(Backend::Silent(
         Box::new(Engine::open(dir).map_err(|e| e.to_string())?),
     ))));
     let ui = MainWindow::new().map_err(|e| e.to_string())?;
+    ui.set_kiosk_mode(kiosk);
     refresh(&ui, &backend.borrow().as_ref().unwrap().snapshot());
     // Default export path resolves against the cassette, not whatever
     // directory the process happened to be launched from.
@@ -577,6 +582,61 @@ fn connect_transport(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             let mut slot = backend.borrow_mut();
             let b = slot.as_mut().expect("backend always present between ticks");
             b.send(Command::Record);
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh(&ui, &b.snapshot());
+            }
+        });
+    }
+    {
+        let backend = Rc::clone(backend);
+        let ui_weak = ui.as_weak();
+        ui.on_seek_start_pressed(move || {
+            let mut slot = backend.borrow_mut();
+            let b = slot.as_mut().expect("backend always present between ticks");
+            b.send(Command::Seek { sample: 0 });
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh(&ui, &b.snapshot());
+            }
+        });
+    }
+    {
+        let backend = Rc::clone(backend);
+        let ui_weak = ui.as_weak();
+        ui.on_seek_end_pressed(move || {
+            let mut slot = backend.borrow_mut();
+            let b = slot.as_mut().expect("backend always present between ticks");
+            // Transport::seek clamps to the tape's length itself, so
+            // the UI doesn't need to track it separately (and Live
+            // mode has no cheap way to ask the engine for it anyway).
+            b.send(Command::Seek { sample: usize::MAX });
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh(&ui, &b.snapshot());
+            }
+        });
+    }
+    {
+        let backend = Rc::clone(backend);
+        let ui_weak = ui.as_weak();
+        ui.on_rewind_pressed(move || {
+            let mut slot = backend.borrow_mut();
+            let b = slot.as_mut().expect("backend always present between ticks");
+            b.send(Command::Rewind {
+                samples: SEEK_STEP_SAMPLES,
+            });
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh(&ui, &b.snapshot());
+            }
+        });
+    }
+    {
+        let backend = Rc::clone(backend);
+        let ui_weak = ui.as_weak();
+        ui.on_fast_forward_pressed(move || {
+            let mut slot = backend.borrow_mut();
+            let b = slot.as_mut().expect("backend always present between ticks");
+            b.send(Command::FastForward {
+                samples: SEEK_STEP_SAMPLES,
+            });
             if let Some(ui) = ui_weak.upgrade() {
                 refresh(&ui, &b.snapshot());
             }

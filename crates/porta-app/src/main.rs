@@ -40,7 +40,10 @@ off which channel index actually lights up - interfaces don't always
 order their channels the way you'd expect.
 
 built with --features ui:
-  porta-app ui <dir>";
+  porta-app ui <dir> [--kiosk]
+
+--kiosk runs the window full-screen and frameless, for a dedicated
+kiosk display (e.g. the Pi's own screen) rather than a desktop window.";
 
 /// Minimal flag parsing: `--name value`. Returns the value if present.
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -135,7 +138,8 @@ fn cmd_probe(args: &[String]) -> Result<(), String> {
 #[cfg(feature = "ui")]
 fn cmd_ui(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("ui needs a project directory")?;
-    ui::run(dir)
+    let kiosk = args.iter().any(|a| a == "--kiosk");
+    ui::run(dir, kiosk)
 }
 
 /// "1R - 2 - 3 - 4R" style summary of which tracks are record-armed.
