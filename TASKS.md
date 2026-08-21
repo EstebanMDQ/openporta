@@ -187,6 +187,17 @@ Verification is `cargo test --workspace` plus the noted assertions.
       than one rewind press, playback only caught the tail of it,
       reading as a single short fragment. Added a `0` key bound to an
       absolute Seek { sample: 0 }.
+      Second follow-up same day: --in-offset 2 was a guess (L6 channels
+      1-2 main mix, 3-6 the four inputs in order) and it was wrong - L6
+      Input 1 showed up on software track 3, not track 1. Turns out the
+      L6 exposes 12 channels over USB, not 6, so the whole assumed
+      layout was off. Added `probe` (new subcommand): opens the input
+      device at its full channel count and prints a live per-channel
+      peak meter, so the real mapping can be read off directly instead
+      of guessed via record/render round trips. Still needs a hands-on
+      session to read the actual channel numbers and land on the right
+      --in-offset (or, if the four inputs aren't contiguous, a proper
+      per-track channel list instead of a single offset).
 
 ## M5 - Slint UI
 
