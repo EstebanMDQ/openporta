@@ -609,3 +609,31 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
 - [ ] M6.2 Performance pass: 128-256 frame period, callback-time
       instrumentation (verify: measured headroom documented in repo)
 - [ ] M6.3 systemd/kiosk launch, microSD save-timing check, Pi setup README
+      Kiosk auto-launch done 2026-08-21, requested directly:
+      `deploy/openporta-kiosk.desktop`, a standard XDG autostart entry
+      (not a systemd unit, not an edit to the Pi's own
+      /etc/xdg/labwc/autostart) - the desktop session already processes
+      `~/.config/autostart/*.desktop` via lxsession-xdg-autostart, so
+      this is purely additive and per-user: no system file touched,
+      survives an OS update, no sudo, trivially reversible. Installed
+      on the real Pi at ~/.config/autostart/openporta-kiosk.desktop.
+      `--kiosk` removes all window chrome (no titlebar, no close
+      button), so added an escape hatch: Escape now toggles kiosk-mode
+      off (a FocusScope wraps the window content and grabs focus on
+      init so the first keypress works without a click first);
+      documented ssh + `pkill -f "porta-app ui"` as the always-works
+      fallback regardless of what has keyboard focus. Both written up
+      in docs/pi-setup.md.
+      Verified for real: ran the exact Exec= command from the
+      installed .desktop file by hand on the Pi (not just read the
+      file) and screenshotted it - genuine fullscreen, no
+      titlebar/taskbar, matching what boot will actually run. NOT
+      verified: an actual reboot (the real test of "does autostart
+      really fire at login," deliberately not done as a background
+      task - disruptive to hardware in active use, doing by hand when
+      convenient) and the Escape keypress itself (no way to inject a
+      real keystroke into the Pi's session remotely without installing
+      a new tool there, which wasn't done without asking first) - the
+      property/handler wiring compiles clean and is correct by
+      construction, but an actual keypress hasn't confirmed it yet.
+      Full gate green across all four feature combinations.
