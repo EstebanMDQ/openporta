@@ -1,6 +1,6 @@
 //! Slint UI (behind the `ui` feature): transport, tape counter, track
-//! strips (arm/fader/pan), master, and meters (M5.1/M5.2). Undo, save,
-//! and export land in M5.3.
+//! strips (arm/fader/pan), master, meters (M5.1/M5.2), save/undo/
+//! export, and cassette new/load (M5.3/M5.4).
 //!
 //! Per the M5 acceptance gate, this drives the engine through the
 //! command queue only - every handler below calls
@@ -9,7 +9,7 @@
 //! `pan()`, `track_level_db()`, ...), never Engine's internal fields.
 //!
 //! There is no real audio here yet (that's the realtime adapter's job,
-//! wired in once M5.3 needs it); a repeating Slint timer stands in for
+//! wired in once M5.5 needs it); a repeating Slint timer stands in for
 //! the audio thread, feeding silence through `process_block` so the
 //! transport, counter, and meters behave the way they will once real
 //! input is connected. Unlike the cpal callback, this timer runs on the
@@ -276,29 +276,57 @@ fn connect_cassette(ui: &MainWindow, engine: &Rc<RefCell<Engine>>) {
     }
 }
 
+/// Mirrors `wire_track!`: the four track strips refresh identically
+/// apart from index and which generated setter they call.
+macro_rules! refresh_track {
+    ($ui:expr, $engine:expr, $index:expr, $set_armed:ident, $set_fader:ident, $set_pan:ident, $set_meter:ident) => {
+        $ui.$set_armed($engine.is_armed($index));
+        $ui.$set_fader($engine.fader_db($index));
+        $ui.$set_pan($engine.pan($index));
+        $ui.$set_meter(meter_fraction($engine.track_level_db($index)));
+    };
+}
+
 fn refresh(ui: &MainWindow, engine: &Engine) {
     ui.set_transport_state(format!("{:?}", engine.state()).into());
     ui.set_counter_text(format_counter(engine.playhead()).into());
 
-    ui.set_track1_armed(engine.is_armed(0));
-    ui.set_track1_fader_db(engine.fader_db(0));
-    ui.set_track1_pan(engine.pan(0));
-    ui.set_track1_meter_fraction(meter_fraction(engine.track_level_db(0)));
-
-    ui.set_track2_armed(engine.is_armed(1));
-    ui.set_track2_fader_db(engine.fader_db(1));
-    ui.set_track2_pan(engine.pan(1));
-    ui.set_track2_meter_fraction(meter_fraction(engine.track_level_db(1)));
-
-    ui.set_track3_armed(engine.is_armed(2));
-    ui.set_track3_fader_db(engine.fader_db(2));
-    ui.set_track3_pan(engine.pan(2));
-    ui.set_track3_meter_fraction(meter_fraction(engine.track_level_db(2)));
-
-    ui.set_track4_armed(engine.is_armed(3));
-    ui.set_track4_fader_db(engine.fader_db(3));
-    ui.set_track4_pan(engine.pan(3));
-    ui.set_track4_meter_fraction(meter_fraction(engine.track_level_db(3)));
+    refresh_track!(
+        ui,
+        engine,
+        0,
+        set_track1_armed,
+        set_track1_fader_db,
+        set_track1_pan,
+        set_track1_meter_fraction
+    );
+    refresh_track!(
+        ui,
+        engine,
+        1,
+        set_track2_armed,
+        set_track2_fader_db,
+        set_track2_pan,
+        set_track2_meter_fraction
+    );
+    refresh_track!(
+        ui,
+        engine,
+        2,
+        set_track3_armed,
+        set_track3_fader_db,
+        set_track3_pan,
+        set_track3_meter_fraction
+    );
+    refresh_track!(
+        ui,
+        engine,
+        3,
+        set_track4_armed,
+        set_track4_fader_db,
+        set_track4_pan,
+        set_track4_meter_fraction
+    );
 
     ui.set_master_fader_db(engine.master_db());
     let (ml, mr) = engine.master_level_db();
