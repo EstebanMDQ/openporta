@@ -302,6 +302,16 @@ export component MainWindow inherits Window {
                     font-size: 11px;
                     color: gray;
                 }
+
+                Text {
+                    text: "Display";
+                    font-size: 11px;
+                    color: gray;
+                }
+                TactileButton {
+                    text: kiosk-mode ? "Exit kiosk mode" : "Enter kiosk mode";
+                    clicked => { kiosk-mode = !kiosk-mode; }
+                }
             }
         }
 

@@ -446,6 +446,7 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
     {
         refresh_device_lists(&ui);
         prefill_remembered_audio_settings(&ui);
+        auto_connect_remembered_device(&ui, &backend, dir);
     }
 
     connect_transport(&ui, &backend);
@@ -760,6 +761,41 @@ fn prefill_remembered_audio_settings(ui: &MainWindow) {
     }
     ui.set_period_text(remembered.period.to_string().into());
     ui.set_channel_offset_text(remembered.input_channel_offset.to_string().into());
+}
+
+/// If `prefill_remembered_audio_settings` just found something to fill
+/// in, connect to it immediately rather than waiting for a manual
+/// Connect press - the app is meant to behave like a dedicated
+/// appliance that's ready when it's turned on, not a general tool that
+/// starts idle until asked. Silent by design when nothing's remembered
+/// yet (a fresh install: the input field is still the "(default)"
+/// placeholder, not a real name). Falls back to Silent with a status
+/// message the same way a failed manual Connect would if the
+/// remembered device has gone away since - Settings' Connect button
+/// is still there either way, for a first connection or to recover.
+#[cfg(feature = "realtime")]
+fn auto_connect_remembered_device(
+    ui: &MainWindow,
+    backend: &Rc<RefCell<Option<Backend>>>,
+    cassette_path: &str,
+) {
+    let Some(input) = non_empty(&ui.get_input_device_text()) else {
+        return;
+    };
+    let output = non_empty(&ui.get_output_device_text());
+    let period = ui.get_period_text().parse::<usize>().ok();
+    let channel_offset = ui.get_channel_offset_text().parse::<usize>().unwrap_or(0);
+    let mut slot = backend.borrow_mut();
+    let status = connect(
+        &mut slot,
+        cassette_path,
+        Some(&input),
+        output.as_deref(),
+        period,
+        channel_offset,
+    );
+    ui.set_status_text(status.into());
+    refresh(ui, &slot.as_ref().unwrap().snapshot());
 }
 
 /// (Re)scans available devices into the Settings view's two dropdowns -
