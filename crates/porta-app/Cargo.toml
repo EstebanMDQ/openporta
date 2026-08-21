@@ -12,7 +12,13 @@ hound = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-cpal = { version = "0.18", optional = true }
+# "pipewire" only affects Linux (target-gated inside cpal itself, so
+# it's a no-op on macOS/Windows): cpal's ALSA host enumerates the same
+# physical device many times over (hw:, plughw:, dmix, front, ...) all
+# under one identical display name with no way to tell them apart -
+# found 2026-08-21 selecting the Zoom L6 by name on the Pi. PipeWire's
+# own host talks to it as one real device instead.
+cpal = { version = "0.18", optional = true, features = ["pipewire"] }
 rtrb = { version = "0.3", optional = true }
 slint = { version = "1.17", optional = true }
 
