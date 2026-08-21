@@ -9,6 +9,7 @@
 
 use crate::engine::{Engine, EngineError};
 use crate::transport::TransportState;
+use crate::NUM_TRACKS;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
@@ -47,9 +48,13 @@ pub enum EngineEvent {
     Playhead {
         sample: usize,
     },
+    /// Post-fader peak per track and the summed master, all in dBFS -
+    /// see `Mixer::track_level_db`/`master_level_db`. One of these
+    /// carries everything a meter refresh needs, so it's pushed once
+    /// per callback rather than one event per channel.
     Levels {
-        left: f32,
-        right: f32,
+        tracks: [f32; NUM_TRACKS],
+        master: (f32, f32),
     },
     /// The audio callback missed its deadline; the count is cumulative.
     Xrun {

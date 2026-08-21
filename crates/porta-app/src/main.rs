@@ -230,7 +230,14 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
             }
         }
         for event in session.poll() {
-            if !matches!(event, porta_engine::command::EngineEvent::Playhead { .. }) {
+            use porta_engine::command::EngineEvent;
+            // Playhead and Levels fire every callback (~200/s at a
+            // 256-frame period) - telemetry for a meter, not something
+            // to print a line per tick.
+            if !matches!(
+                event,
+                EngineEvent::Playhead { .. } | EngineEvent::Levels { .. }
+            ) {
                 println!("  {event:?}");
             }
         }

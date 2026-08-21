@@ -555,6 +555,10 @@ pub fn start(
             let _ = event_tx.push(EngineEvent::Playhead {
                 sample: engine.playhead(),
             });
+            let _ = event_tx.push(EngineEvent::Levels {
+                tracks: std::array::from_fn(|t| engine.track_level_db(t)),
+                master: engine.master_level_db(),
+            });
         },
         move |err| eprintln!("audio output error: {err}"),
         None,
