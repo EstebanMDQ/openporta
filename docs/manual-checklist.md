@@ -58,7 +58,10 @@ Findings (fill in):
   reflected in the app's own xrun counters - root cause is a disk write
   and allocation reachable from `Command::Stop` inside the realtime
   callback (REQ-902 violation), tracked as M4.4 in TASKS.md. Re-run the
-  period/xrun steps above once M4.4 lands.
+  period/xrun steps above once M4.4 lands. Also found: `live` never
+  persisted anything (no Save path reachable from the audio thread) -
+  fixed as M4.5, verified on the L6 (record, quit, saw "saved.", fresh
+  render showed the take).
 
 ## M5 - UI
 

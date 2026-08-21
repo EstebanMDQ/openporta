@@ -165,6 +165,18 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
         }
     }
     println!("xruns: {}", session.xrun_summary());
+
+    // Save/Bounce/Undo/Redo can't run while the audio thread owns the
+    // engine (REQ-902), so quitting is the only place `live` persists:
+    // stop the streams, take the engine back, finish any open pass, and
+    // write it to disk.
+    println!("saving...");
+    let mut engine = session
+        .shutdown()
+        .map_err(|e| format!("shutdown failed, nothing saved: {e}"))?;
+    engine.stop();
+    engine.save().map_err(|e| format!("save failed: {e}"))?;
+    println!("saved.");
     Ok(())
 }
 

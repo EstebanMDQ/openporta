@@ -28,8 +28,9 @@ use porta_engine::command::{Command, EngineEvent};
 use porta_engine::engine::Engine;
 use porta_engine::NUM_TRACKS;
 use rtrb::{Consumer, Producer, RingBuffer};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Command/event queue depth. Generous: these are human-scale events.
 const QUEUE: usize = 256;
@@ -47,6 +48,114 @@ pub enum RealtimeError {
     UnsupportedRate(String),
     #[error(transparent)]
     Cpal(#[from] cpal::Error),
+    #[error("audio thread did not hand the engine back in time")]
+    ShutdownTimeout,
+}
+
+/// One-shot exchange used only at shutdown: the audio thread owns the
+/// engine outright for the life of the stream (REQ-902 forbids sharing
+/// it under a lock), so the only way to run a blocking command like
+/// Save is to stop the stream and hand the engine back to whoever asked
+/// for it. `quit` is a plain atomic so the audio side can check it every
+/// callback for free; the engine itself crosses on the wait-free ring
+/// already used for commands and events.
+///
+/// Split from `RealtimeSession`/the cpal closure so the handoff protocol
+/// itself is unit-testable without real hardware.
+struct HandoffAudioSide<T> {
+    quit: Arc<AtomicBool>,
+    tx: Producer<T>,
+}
+
+impl<T> HandoffAudioSide<T> {
+    /// Call once per callback. If a handoff was requested, moves the
+    /// payload out of `slot` and returns true: the caller must not touch
+    /// it again and should fill silence from now on.
+    fn maybe_handoff(&mut self, slot: &mut Option<T>) -> bool {
+        if !self.quit.load(Ordering::Relaxed) {
+            return false;
+        }
+        if let Some(payload) = slot.take() {
+            let _ = self.tx.push(payload);
+        }
+        true
+    }
+}
+
+struct HandoffControlSide<T> {
+    quit: Arc<AtomicBool>,
+    rx: Consumer<T>,
+}
+
+impl<T> HandoffControlSide<T> {
+    /// Signal the audio side and block (briefly - this runs on the
+    /// control thread, never the callback) until it hands the payload
+    /// back or `timeout` elapses.
+    fn request(&mut self, timeout: Duration) -> Result<T, RealtimeError> {
+        self.quit.store(true, Ordering::Relaxed);
+        let start = Instant::now();
+        loop {
+            if let Ok(payload) = self.rx.pop() {
+                return Ok(payload);
+            }
+            if start.elapsed() > timeout {
+                return Err(RealtimeError::ShutdownTimeout);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_hands_the_payload_back() {
+        let quit = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = RingBuffer::<u64>::new(1);
+        let mut audio = HandoffAudioSide {
+            quit: Arc::clone(&quit),
+            tx,
+        };
+        let mut control = HandoffControlSide { quit, rx };
+
+        let handle = std::thread::spawn(move || {
+            let mut slot = Some(42u64);
+            loop {
+                if audio.maybe_handoff(&mut slot) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let got = control.request(Duration::from_secs(2)).expect("handoff");
+        assert_eq!(got, 42);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn no_handoff_without_a_request() {
+        let quit = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = RingBuffer::<u64>::new(1);
+        let mut audio = HandoffAudioSide { quit, tx };
+        let mut slot = Some(7u64);
+        assert!(!audio.maybe_handoff(&mut slot));
+        assert_eq!(slot, Some(7));
+        assert!(rx.pop().is_err());
+    }
+
+    #[test]
+    fn timeout_when_the_audio_side_never_answers() {
+        let quit = Arc::new(AtomicBool::new(false));
+        let (_tx, rx) = RingBuffer::<u64>::new(1);
+        let mut control = HandoffControlSide { quit, rx };
+        assert!(matches!(
+            control.request(Duration::from_millis(20)),
+            Err(RealtimeError::ShutdownTimeout)
+        ));
+    }
 }
 
 /// List devices, so a support problem is one command away from being
@@ -104,12 +213,14 @@ pub struct Xruns {
     pub dropped: AtomicU64,
 }
 
-/// A running session. Dropping this stops the audio.
+/// A running session. Dropping this stops the audio without saving -
+/// call `shutdown` to get the engine back first.
 pub struct RealtimeSession {
     _input: Option<cpal::Stream>,
     _output: cpal::Stream,
     commands: Producer<Command>,
     events: Consumer<EngineEvent>,
+    engine_handoff: HandoffControlSide<Engine>,
     pub xruns: Arc<Xruns>,
     pub period: usize,
     pub input_device: Option<String>,
@@ -146,6 +257,16 @@ impl RealtimeSession {
             self.xruns.dropped.load(Ordering::Relaxed),
         )
     }
+
+    /// Stop the audio thread and take the engine back so the caller can
+    /// run blocking commands (Save, Bounce, Undo, Redo) on it safely.
+    /// `self` is consumed: the streams tear down once this returns,
+    /// which only happens after the audio side has confirmed the
+    /// handoff, so the callback never gets called again once it's given
+    /// up the engine.
+    pub fn shutdown(mut self) -> Result<Engine, RealtimeError> {
+        self.engine_handoff.request(Duration::from_secs(2))
+    }
 }
 
 /// Start playback (and capture, if an input device is available).
@@ -153,7 +274,7 @@ impl RealtimeSession {
 /// names; `None` means the system default. `period` is a hint - the
 /// device decides, and some hosts ignore it entirely.
 pub fn start(
-    mut engine: Engine,
+    engine: Engine,
     input_name: Option<&str>,
     output_name: Option<&str>,
     period: Option<usize>,
@@ -177,6 +298,19 @@ pub fn start(
     let (mut event_tx, event_rx) = RingBuffer::<EngineEvent>::new(QUEUE);
     let (mut capture_tx, mut capture_rx) = RingBuffer::<f32>::new(INPUT_RING);
     let xruns = Arc::new(Xruns::default());
+
+    // Shutdown-only handoff (see HandoffAudioSide doc comment): the only
+    // way anything outside the callback ever touches the engine again.
+    let quit = Arc::new(AtomicBool::new(false));
+    let (engine_tx, engine_rx) = RingBuffer::<Engine>::new(1);
+    let mut engine_handoff_audio = HandoffAudioSide {
+        quit: Arc::clone(&quit),
+        tx: engine_tx,
+    };
+    let engine_handoff_control = HandoffControlSide {
+        quit,
+        rx: engine_rx,
+    };
 
     // Optional capture stream. Its only job is to hand mono samples to
     // the output callback.
@@ -216,12 +350,17 @@ pub fn start(
     let mut mix_l = vec![0.0f32; MAX_PERIOD];
     let mut mix_r = vec![0.0f32; MAX_PERIOD];
     let mut last_state = engine.state();
+    let mut engine_slot = Some(engine);
     let counters = Arc::clone(&xruns);
 
     let stream = output.build_output_stream(
         out_config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
             data.fill(0.0);
+            if engine_handoff_audio.maybe_handoff(&mut engine_slot) {
+                return;
+            }
+            let engine = engine_slot.as_mut().expect("handed off, not silenced");
             let frames = data.len() / out_channels;
             if frames > MAX_PERIOD {
                 // Bigger than we sized for; stay silent rather than
@@ -254,7 +393,7 @@ pub fn start(
                     if cmd.is_blocking() {
                         let _ = event_tx.push(EngineEvent::Rejected(cmd));
                     } else {
-                        let _ = porta_engine::command::apply(&mut engine, cmd);
+                        let _ = porta_engine::command::apply(&mut *engine, cmd);
                     }
                 }
 
@@ -270,7 +409,7 @@ pub fn start(
                         if cmd.is_blocking() {
                             let _ = event_tx.push(EngineEvent::Rejected(cmd));
                         } else {
-                            let _ = porta_engine::command::apply(&mut engine, cmd);
+                            let _ = porta_engine::command::apply(&mut *engine, cmd);
                         }
                     }
                     break;
@@ -303,6 +442,7 @@ pub fn start(
         _output: stream,
         commands: command_tx,
         events: event_rx,
+        engine_handoff: engine_handoff_control,
         xruns,
         period,
         input_device: input_name_used,
