@@ -1,28 +1,145 @@
-// M5.1 skeleton: transport + tape counter only. Track strips (fader,
-// pan, arm) arrive in M5.2; undo/save/export UI in M5.3.
+// M5.1: transport + tape counter. M5.2: track strips (arm/fader/pan) +
+// master + meters. Undo/save/export UI arrives in M5.3.
 
-import { Button } from "std-widgets.slint";
+import { Button, Slider } from "std-widgets.slint";
+
+// A vertical meter bar: a fixed-height track with a bottom-anchored
+// fill. `level-fraction` is pre-clamped to 0..1 in Rust - no math here.
+component MeterBar inherits Rectangle {
+    in property <float> level-fraction: 0;
+    width: 14px;
+    height: 70px;
+    background: #222;
+    border-radius: 2px;
+
+    Rectangle {
+        x: 0;
+        y: parent.height - self.height;
+        width: parent.width;
+        height: parent.height * level-fraction;
+        background: level-fraction > 0.85 ? #e05252 : #4caf6d;
+        border-radius: 2px;
+    }
+}
+
+component TrackStrip inherits Rectangle {
+    in property <string> track-label: "1";
+    in property <bool> armed: false;
+    in property <float> fader-db: 0;
+    in property <float> pan: 0;
+    in property <float> meter-fraction: 0;
+
+    callback arm-pressed();
+    callback fader-changed(float);
+    callback pan-changed(float);
+
+    width: 80px;
+    background: #1b1b1b;
+    border-radius: 6px;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+        alignment: start;
+
+        Text {
+            text: "Track " + track-label;
+            horizontal-alignment: center;
+            font-size: 12px;
+        }
+        Button {
+            text: armed ? "ARMED" : "arm";
+            clicked => { arm-pressed(); }
+        }
+        HorizontalLayout {
+            alignment: center;
+            MeterBar { level-fraction: meter-fraction; }
+        }
+        Text {
+            text: "fader";
+            horizontal-alignment: center;
+            font-size: 10px;
+            color: gray;
+        }
+        Slider {
+            minimum: -60;
+            maximum: 6;
+            value: fader-db;
+            changed(v) => { fader-changed(v); }
+        }
+        Text {
+            text: "pan";
+            horizontal-alignment: center;
+            font-size: 10px;
+            color: gray;
+        }
+        Slider {
+            minimum: -1;
+            maximum: 1;
+            value: pan;
+            changed(v) => { pan-changed(v); }
+        }
+    }
+}
 
 export component MainWindow inherits Window {
     title: "openporta";
-    width: 320px;
-    height: 180px;
+    width: 560px;
+    height: 400px;
 
     callback play-pressed();
     callback stop-pressed();
     callback record-pressed();
+    callback master-fader-changed(float);
 
     in property <string> transport-state: "Stopped";
     in property <string> counter-text: "00:00";
+    in property <float> master-fader-db: 0;
+    in property <float> master-meter-l-fraction: 0;
+    in property <float> master-meter-r-fraction: 0;
+
+    // Aliases so Rust can read/set each strip's state and connect its
+    // callbacks from the root - the strips themselves are instantiated
+    // once, in place, in the layout below.
+    in property <bool> track1-armed <=> track1.armed;
+    in property <float> track1-fader-db <=> track1.fader-db;
+    in property <float> track1-pan <=> track1.pan;
+    in property <float> track1-meter-fraction <=> track1.meter-fraction;
+    callback track1-arm-pressed <=> track1.arm-pressed;
+    callback track1-fader-changed <=> track1.fader-changed;
+    callback track1-pan-changed <=> track1.pan-changed;
+
+    in property <bool> track2-armed <=> track2.armed;
+    in property <float> track2-fader-db <=> track2.fader-db;
+    in property <float> track2-pan <=> track2.pan;
+    in property <float> track2-meter-fraction <=> track2.meter-fraction;
+    callback track2-arm-pressed <=> track2.arm-pressed;
+    callback track2-fader-changed <=> track2.fader-changed;
+    callback track2-pan-changed <=> track2.pan-changed;
+
+    in property <bool> track3-armed <=> track3.armed;
+    in property <float> track3-fader-db <=> track3.fader-db;
+    in property <float> track3-pan <=> track3.pan;
+    in property <float> track3-meter-fraction <=> track3.meter-fraction;
+    callback track3-arm-pressed <=> track3.arm-pressed;
+    callback track3-fader-changed <=> track3.fader-changed;
+    callback track3-pan-changed <=> track3.pan-changed;
+
+    in property <bool> track4-armed <=> track4.armed;
+    in property <float> track4-fader-db <=> track4.fader-db;
+    in property <float> track4-pan <=> track4.pan;
+    in property <float> track4-meter-fraction <=> track4.meter-fraction;
+    callback track4-arm-pressed <=> track4.arm-pressed;
+    callback track4-fader-changed <=> track4.fader-changed;
+    callback track4-pan-changed <=> track4.pan-changed;
 
     VerticalLayout {
-        padding: 20px;
-        spacing: 14px;
-        alignment: center;
+        padding: 16px;
+        spacing: 12px;
 
         Text {
             text: counter-text;
-            font-size: 36px;
+            font-size: 30px;
             horizontal-alignment: center;
         }
         Text {
@@ -36,6 +153,52 @@ export component MainWindow inherits Window {
             Button { text: "Play"; clicked => { play-pressed(); } }
             Button { text: "Stop"; clicked => { stop-pressed(); } }
             Button { text: "Record"; clicked => { record-pressed(); } }
+        }
+
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: center;
+
+            track1 := TrackStrip { track-label: "1"; }
+            track2 := TrackStrip { track-label: "2"; }
+            track3 := TrackStrip { track-label: "3"; }
+            track4 := TrackStrip { track-label: "4"; }
+
+            Rectangle {
+                width: 80px;
+                background: #1b1b1b;
+                border-radius: 6px;
+
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 6px;
+                    alignment: start;
+
+                    Text {
+                        text: "Master";
+                        horizontal-alignment: center;
+                        font-size: 12px;
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: center;
+                        MeterBar { level-fraction: master-meter-l-fraction; }
+                        MeterBar { level-fraction: master-meter-r-fraction; }
+                    }
+                    Text {
+                        text: "master";
+                        horizontal-alignment: center;
+                        font-size: 10px;
+                        color: gray;
+                    }
+                    Slider {
+                        minimum: -60;
+                        maximum: 6;
+                        value: master-fader-db;
+                        changed(v) => { master-fader-changed(v); }
+                    }
+                }
+            }
         }
     }
 }

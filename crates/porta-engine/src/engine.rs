@@ -120,6 +120,30 @@ impl Engine {
         self.armed[track]
     }
 
+    pub fn fader_db(&self, track: usize) -> f32 {
+        self.mixer.fader_db(track)
+    }
+
+    pub fn pan(&self, track: usize) -> f32 {
+        self.mixer.pan(track)
+    }
+
+    pub fn master_db(&self) -> f32 {
+        self.mixer.master_db()
+    }
+
+    /// Post-fader peak of `track` from the most recently mixed block,
+    /// in dBFS. For a UI meter; see Mixer::track_level_db.
+    pub fn track_level_db(&self, track: usize) -> f32 {
+        self.mixer.track_level_db(track)
+    }
+
+    /// Peak of the summed stereo output from the most recently mixed
+    /// block, in dBFS.
+    pub fn master_level_db(&self) -> (f32, f32) {
+        self.mixer.master_level_db()
+    }
+
     pub fn seek(&mut self, pos: usize) -> bool {
         self.transport.seek(pos)
     }
@@ -390,6 +414,37 @@ mod tests {
             "played {} dBFS",
             rms_dbfs(&played)
         );
+    }
+
+    #[test]
+    fn levels_reflect_the_current_block_during_playback() {
+        let dir = TempDir::new("levels");
+        let mut e = Engine::create_with_character(&dir.0, 96_000, TapeCharacter::clean()).unwrap();
+        e.set_armed(0, true);
+        e.record();
+        let take = sine(1000.0, 0.0, 24_000); // 0 dBFS peak
+        run(&mut e, 0, &take, 512);
+        e.stop();
+        // (The meter was already live during that recording pass, per
+        // REQ-305 - monitoring goes through the same mix_block call.)
+
+        e.seek(0);
+        e.play();
+        run(&mut e, 0, &silence(24_000), 512);
+
+        // Track 0's fader is unity, so its meter reads the take's own
+        // peak; the other tracks never played anything.
+        assert!(
+            (e.track_level_db(0) - 0.0).abs() < 0.5,
+            "track 0 got {} dB",
+            e.track_level_db(0)
+        );
+        assert!(e.track_level_db(1) < -100.0);
+
+        // Center pan costs 3.01 dB per side.
+        let (ml, mr) = e.master_level_db();
+        assert!((ml - (-3.01)).abs() < 0.5, "master L got {ml} dB");
+        assert!((mr - (-3.01)).abs() < 0.5, "master R got {mr} dB");
     }
 
     #[test]

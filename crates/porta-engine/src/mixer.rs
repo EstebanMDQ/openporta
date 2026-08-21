@@ -14,8 +14,20 @@ use porta_dsp::SAMPLE_RATE;
 /// Parameter ramp length: 5ms.
 const SMOOTH_SAMPLES: u32 = SAMPLE_RATE / 200;
 
+/// Lowest level a meter reports; silence clamps here instead of
+/// negative infinity so a UI meter has something finite to draw.
+const FLOOR_DBFS: f32 = -160.0;
+
 fn db_to_amp(db: f32) -> f32 {
     10f32.powf(db / 20.0)
+}
+
+fn amp_to_db(amp: f32) -> f32 {
+    if amp <= 0.0 {
+        FLOOR_DBFS
+    } else {
+        (20.0 * amp.log10()).max(FLOOR_DBFS)
+    }
 }
 
 /// Equal-power pan law. `pan` in [-1, 1], 0 = center (-3 dB per side).
@@ -72,6 +84,12 @@ pub struct Mixer {
     master_db: f32,
     left: [Smoothed; NUM_TRACKS],
     right: [Smoothed; NUM_TRACKS],
+    /// Peak of each track's contribution (post-fader, pre-pan) in the
+    /// most recent block, and of the summed master output. A meter
+    /// reading, not audio - fine to read from a UI timer, updated for
+    /// free alongside the mix itself.
+    track_peak: [f32; NUM_TRACKS],
+    master_peak: (f32, f32),
 }
 
 impl Default for Mixer {
@@ -91,6 +109,8 @@ impl Mixer {
             master_db: 0.0,
             left: [Smoothed::settled(l); NUM_TRACKS],
             right: [Smoothed::settled(r); NUM_TRACKS],
+            track_peak: [0.0; NUM_TRACKS],
+            master_peak: (0.0, 0.0),
         }
     }
 
@@ -116,6 +136,19 @@ impl Mixer {
 
     pub fn master_db(&self) -> f32 {
         self.master_db
+    }
+
+    /// Post-fader peak of `track` from the most recently mixed block,
+    /// in dBFS. Meant for a UI meter, not audio-critical - one block of
+    /// latency is fine.
+    pub fn track_level_db(&self, track: usize) -> f32 {
+        amp_to_db(self.track_peak[track])
+    }
+
+    /// Peak of the summed stereo output from the most recently mixed
+    /// block, in dBFS.
+    pub fn master_level_db(&self) -> (f32, f32) {
+        (amp_to_db(self.master_peak.0), amp_to_db(self.master_peak.1))
     }
 
     fn target(&self, track: usize) -> (f32, f32) {
@@ -144,11 +177,21 @@ impl Mixer {
             let (tl, tr) = self.target(t);
             self.left[t].set_target(tl);
             self.right[t].set_target(tr);
+            let fader_amp = db_to_amp(self.fader_db[t]);
+            let mut peak = 0.0f32;
             for (n, &s) in input.iter().enumerate() {
                 out_l[n] += s * self.left[t].tick();
                 out_r[n] += s * self.right[t].tick();
+                peak = peak.max(s.abs());
             }
+            // Fader only, not master: lets the meters show track
+            // balance independent of the overall volume knob.
+            self.track_peak[t] = peak * fader_amp;
         }
+        self.master_peak = (
+            out_l.iter().fold(0.0f32, |acc, &s| acc.max(s.abs())),
+            out_r.iter().fold(0.0f32, |acc, &s| acc.max(s.abs())),
+        );
     }
 }
 
@@ -235,5 +278,83 @@ mod tests {
         m.mix_block(&inputs, &mut l, &mut r);
         // Four coherent copies = +12 dB over one track's contribution.
         assert_rms_near_db!(&l, -12.0 - 3.01 - 3.01 + 12.04, 0.15);
+    }
+
+    #[test]
+    fn silent_track_meters_at_the_floor() {
+        let mut m = Mixer::new();
+        mix_once(&mut m, 0, &silence(4800));
+        assert_eq!(m.track_level_db(0), FLOOR_DBFS);
+        assert_eq!(m.track_level_db(1), FLOOR_DBFS);
+        let (ml, mr) = m.master_level_db();
+        assert_eq!(ml, FLOOR_DBFS);
+        assert_eq!(mr, FLOOR_DBFS);
+    }
+
+    #[test]
+    fn track_level_tracks_the_input_peak() {
+        let mut m = Mixer::new();
+        let s = sine(1000.0, -6.0, 4800); // -6 dBFS peak
+        mix_once(&mut m, 1, &s);
+        assert!(
+            (m.track_level_db(1) - (-6.0)).abs() < 0.2,
+            "got {} dB",
+            m.track_level_db(1)
+        );
+        // Untouched tracks stay at the floor, not the same reading.
+        assert_eq!(m.track_level_db(0), FLOOR_DBFS);
+    }
+
+    #[test]
+    fn track_level_follows_the_fader_but_not_the_master() {
+        let mut m = Mixer::new();
+        let s = sine(1000.0, 0.0, 48_000); // let the 5ms ramp settle first
+        mix_once(&mut m, 2, &s);
+        let unity = mix_once_meter(&mut m, 2, &s);
+
+        m.set_fader_db(2, -10.0);
+        mix_once(&mut m, 2, &s); // settle the new fader ramp
+        let faded = mix_once_meter(&mut m, 2, &s);
+        assert!(
+            (unity - faded - 10.0).abs() < 0.3,
+            "fader -10dB should read -10dB lower on the meter, got unity={unity} faded={faded}"
+        );
+
+        // Master is a separate knob for the whole bus, not per track:
+        // it must not move an individual track's meter.
+        m.set_master_db(-20.0);
+        mix_once(&mut m, 2, &s);
+        let with_master_down = mix_once_meter(&mut m, 2, &s);
+        assert!(
+            (faded - with_master_down).abs() < 0.3,
+            "master fader must not affect the per-track meter, got {faded} vs {with_master_down}"
+        );
+    }
+
+    #[test]
+    fn master_level_reflects_the_mix() {
+        let mut m = Mixer::new();
+        let s = sine(1000.0, 0.0, 48_000);
+        mix_once(&mut m, 0, &s); // settle
+        mix_once(&mut m, 0, &s);
+        let (ml, mr) = m.master_level_db();
+        // Center pan: -3.01 dB per side off a 0 dBFS-peak sine.
+        assert!((ml - (-3.01)).abs() < 0.2, "left {ml} dB");
+        assert!((mr - (-3.01)).abs() < 0.2, "right {mr} dB");
+
+        m.set_master_db(-12.0);
+        mix_once(&mut m, 0, &s); // settle the new master ramp
+        mix_once(&mut m, 0, &s);
+        let (ml2, _) = m.master_level_db();
+        assert!(
+            (ml - ml2 - 12.0).abs() < 0.3,
+            "master fader should reach the master meter"
+        );
+    }
+
+    /// Mix one block and return the track's post-fader meter reading.
+    fn mix_once_meter(mixer: &mut Mixer, track: usize, signal: &[f32]) -> f32 {
+        mix_once(mixer, track, signal);
+        mixer.track_level_db(track)
     }
 }

@@ -238,7 +238,38 @@ Verification is `cargo test --workspace` plus the noted assertions.
       manual-verification split as M4's hardware checklist: pure logic
       (format_counter) gets an automated test, window/wiring behavior
       gets watched directly.
-- [ ] M5.2 Track strips (fader/pan/arm) + master + meters
+- [x] M5.2 Track strips (fader/pan/arm) + master + meters.
+      Metering didn't exist anywhere in the engine before this -
+      EngineEvent::Levels was declared but never emitted. Added it
+      properly at the source: Mixer now tracks each track's post-fader
+      peak and the summed master L/R peak per block (computed inline in
+      mix_block, no extra pass over the audio, REQ-902-safe - plain
+      floats, no allocation), exposed as dBFS via
+      Mixer::track_level_db/master_level_db and the matching
+      Engine::track_level_db/master_level_db/fader_db/pan/master_db
+      read accessors. Deliberately fader-only, not master, on the
+      per-track meter, so it reads track balance independent of the
+      overall volume knob - covered by
+      track_level_follows_the_fader_but_not_the_master. 5 new mixer
+      tests plus an engine-level integration test
+      (levels_reflect_the_current_block_during_playback) driving the
+      real process_block path, not just the isolated Mixer - it caught
+      a wrong assumption in my first draft (the meter is live during
+      record monitoring too, per REQ-305, not just during playback).
+      UI: one TrackStrip Slint component (arm button, fader slider, pan
+      slider, a MeterBar) instantiated 4 times, properties/callbacks
+      aliased to the root with <=> so Rust only touches root-level
+      generated methods; a wire_track! macro collapses the four
+      near-identical arm/fader/pan handler triples into one definition.
+      Verified on the real window: arm toggle confirmed via its ARMED
+      label; fader/pan/master sliders confirmed with actual simulated
+      mouse drags (cliclick, installed for this) rather than trusting
+      the accessibility "set value" shortcut, which can bypass a
+      widget's real event path - checked the resulting value through
+      System Events after each drag and visually confirmed the knob
+      positions diverged from the untouched tracks. Clean quit, no
+      panics. Full gate green, including cargo test -p porta-app
+      --features ui.
 - [ ] M5.3 Cassette new/load/save, undo button, export dialog, punch UX
 
 ## M6 - Raspberry Pi 4 deployment
