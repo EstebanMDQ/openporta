@@ -23,10 +23,16 @@ Make a cassette and drive it live:
 
 ```bash
 cargo run -p porta-app -- new ~/takes/test.porta --minutes 5
-cargo run -p porta-app --features realtime -- live ~/takes/test.porta --period 256
+cargo run -p porta-app --features realtime -- live ~/takes/test.porta --period 256 --in-offset 2
 ```
 
-Keys: `p` play, `s` stop, `r` record, `1`-`4` arm, `[` rewind, `]`
+`--in-offset 2` matters on the L6: its channels 1-2 carry its own main
+mix, not a per-track send, so without the offset track inputs come from
+the wrong channels. Check the banner - it prints which device channels
+feed which tracks.
+
+Keys: `p` play, `s` stop, `r` record, `1`-`4` arm/disarm (prints a
+status line each time, e.g. `1R - 2 - 3 - 4`), `[` rewind, `]`
 fast-forward, `q` quit.
 
 - [ ] Playback of a blank tape is silent, with no clicks, pops, or
@@ -61,7 +67,13 @@ Findings (fill in):
   period/xrun steps above once M4.4 lands. Also found: `live` never
   persisted anything (no Save path reachable from the audio thread) -
   fixed as M4.5, verified on the L6 (record, quit, saw "saved.", fresh
-  render showed the take).
+  render showed the take). Also found: input capture only ever opened 1
+  channel and broadcast it to all 4 tracks regardless of which was
+  armed, and on the L6 that one channel wasn't even a per-track send -
+  fixed as M4.6 (`--in-offset` flag, one ring per track) along with an
+  arm/disarm toggle (previously arm-only). Re-run the steps above with
+  `--in-offset 2` to confirm each track actually captures its own L6
+  channel.
 
 ## M5 - UI
 

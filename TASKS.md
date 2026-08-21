@@ -165,6 +165,23 @@ Verification is `cargo test --workspace` plus the noted assertions.
       updated, non-silent render). New handoff-protocol unit tests in
       realtime.rs (cargo test -p porta-app --features realtime), full
       gate green.
+- [x] M4.6 Input capture only ever opened 1 channel and broadcast that
+      same mono signal to all 4 tracks regardless of which was armed
+      (`[slice; NUM_TRACKS]` in realtime.rs). Found 2026-08-20 during
+      the hardware checklist: takes were inconsistent/partial and on the
+      Zoom L6 channels 1-2 are its own main mix, not a per-track send,
+      so whichever single channel cpal picked wasn't even the right
+      signal. Fixed: capture now opens up to channel_offset + NUM_TRACKS
+      device channels and gives each track its own ring, fed from a
+      distinct channel; a new `--in-offset N` flag on `live` skips
+      leading channels (2 for the L6). Tracks beyond however many
+      channels the device actually has record silence, not a duplicate.
+      Also added, same session: cmd_live's 1-4 keys now toggle
+      arm/disarm (previously arm-only, no way back) and print a status
+      line after every toggle ("1R - 2 - 3 - 4R" style).
+      Verified 2026-08-20 on the MacBook with the L6 at --in-offset 2:
+      banner correctly reports "channels 3-6 -> tracks 1-4", arm status
+      line toggles correctly through 1/2/1. Full gate green.
 
 ## M5 - Slint UI
 

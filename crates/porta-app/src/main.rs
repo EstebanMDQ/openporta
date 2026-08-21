@@ -25,7 +25,13 @@ from the start, or of the first N seconds.
 
 built with --features realtime:
   porta-app devices
-  porta-app live <dir> [--in NAME] [--out NAME] [--period N]";
+  porta-app live <dir> [--in NAME] [--out NAME] [--period N]
+                       [--in-offset N]
+
+--in-offset skips that many leading input channels before assigning
+the rest to tracks 1-4 in order. Use it on interfaces whose first
+channels carry something other than a per-track send - e.g. --in-offset
+2 on a Zoom L6, whose channels 1-2 are its own main mix.";
 
 /// Minimal flag parsing: `--name value`. Returns the value if present.
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
@@ -112,6 +118,23 @@ fn cmd_devices() -> Result<(), String> {
     Ok(())
 }
 
+/// "1R - 2 - 3 - 4R" style summary of which tracks are record-armed.
+#[cfg(feature = "realtime")]
+fn arm_status(armed: &[bool; porta_engine::NUM_TRACKS]) -> String {
+    armed
+        .iter()
+        .enumerate()
+        .map(|(t, &on)| {
+            if on {
+                format!("{}R", t + 1)
+            } else {
+                (t + 1).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" - ")
+}
+
 /// Drive a cassette from the keyboard against real hardware. This is the
 /// harness for the manual checklist in docs/manual-checklist.md; the UI
 /// proper arrives in M5.
@@ -123,16 +146,35 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("live needs a project directory")?;
     let engine = Engine::open(dir).map_err(|e| e.to_string())?;
     let period = parse_num::<usize>(args, "--period")?;
-    let mut session = realtime::start(engine, flag(args, "--in"), flag(args, "--out"), period)
-        .map_err(|e| e.to_string())?;
+    let channel_offset = parse_num::<usize>(args, "--in-offset")?.unwrap_or(0);
+    let mut session = realtime::start(
+        engine,
+        flag(args, "--in"),
+        flag(args, "--out"),
+        period,
+        channel_offset,
+    )
+    .map_err(|e| e.to_string())?;
 
     println!("output: {}", session.output_device);
-    println!(
-        "input:  {}",
-        session.input_device.as_deref().unwrap_or("(none)")
-    );
+    match session.input_device.as_deref() {
+        Some(name) => println!(
+            "input:  {name} (channels {}-{} -> tracks 1-{}{})",
+            session.input_channel_offset + 1,
+            session.input_channel_offset + session.input_tracks,
+            session.input_tracks,
+            if session.input_tracks < porta_engine::NUM_TRACKS {
+                " - fewer input channels than tracks, the rest record silence"
+            } else {
+                ""
+            }
+        ),
+        None => println!("input:  (none)"),
+    }
     println!("period: {} frames", session.period);
-    println!("keys: p play, s stop, r record, 1-4 arm, [ rew, ] ff, q quit");
+    println!("keys: p play, s stop, r record, 1-4 arm/disarm, [ rew, ] ff, q quit");
+    let mut armed = [false; porta_engine::NUM_TRACKS];
+    println!("  {}", arm_status(&armed));
 
     for line in std::io::stdin().lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -144,7 +186,12 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
             "]" => Some(Command::FastForward { samples: 48_000 }),
             t if matches!(t, "1" | "2" | "3" | "4") => {
                 let track = t.parse::<usize>().unwrap() - 1;
-                Some(Command::Arm { track, on: true })
+                armed[track] = !armed[track];
+                println!("  {}", arm_status(&armed));
+                Some(Command::Arm {
+                    track,
+                    on: armed[track],
+                })
             }
             "q" => break,
             "" => None,

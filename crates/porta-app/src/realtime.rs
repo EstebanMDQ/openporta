@@ -201,6 +201,23 @@ fn supports_48k(device: &cpal::Device) -> Result<cpal::SupportedStreamConfigRang
         .ok_or_else(|| RealtimeError::UnsupportedRate(device.to_string()))
 }
 
+/// Widest channel count the device offers at 48kHz. Interfaces like the
+/// Zoom L6 expose their inputs as one multi-channel device (main mix on
+/// channels 1-2, per-track sends on 3-6), so we need to know how many
+/// channels we can actually ask cpal for before deciding how many of
+/// them we can route to tracks.
+fn max_input_channels(device: &cpal::Device) -> Result<u16, RealtimeError> {
+    device
+        .supported_input_configs()?
+        .filter(|c| {
+            c.min_sample_rate() <= porta_engine::SAMPLE_RATE
+                && c.max_sample_rate() >= porta_engine::SAMPLE_RATE
+        })
+        .map(|c| c.channels())
+        .max()
+        .ok_or_else(|| RealtimeError::UnsupportedRate(device.to_string()))
+}
+
 /// Counters the control thread can read without disturbing audio.
 #[derive(Default)]
 pub struct Xruns {
@@ -225,6 +242,12 @@ pub struct RealtimeSession {
     pub period: usize,
     pub input_device: Option<String>,
     pub output_device: String,
+    /// How many tracks actually have a distinct input channel wired up
+    /// (0 with no input device, otherwise up to NUM_TRACKS - fewer if
+    /// the device doesn't have channel_offset + NUM_TRACKS channels).
+    /// Tracks beyond this record silence rather than a duplicate signal.
+    pub input_tracks: usize,
+    pub input_channel_offset: usize,
 }
 
 impl RealtimeSession {
@@ -272,12 +295,16 @@ impl RealtimeSession {
 /// Start playback (and capture, if an input device is available).
 /// `input_name`/`output_name` are substring matches against device
 /// names; `None` means the system default. `period` is a hint - the
-/// device decides, and some hosts ignore it entirely.
+/// device decides, and some hosts ignore it entirely. `channel_offset`
+/// skips that many leading input channels before assigning the rest to
+/// tracks 1..NUM_TRACKS in order - e.g. 2 on a Zoom L6, whose channels 1
+/// and 2 carry its own main mix rather than a per-track send.
 pub fn start(
     engine: Engine,
     input_name: Option<&str>,
     output_name: Option<&str>,
     period: Option<usize>,
+    channel_offset: usize,
 ) -> Result<RealtimeSession, RealtimeError> {
     let host = cpal::default_host();
     let output = pick(host.output_devices()?, output_name)
@@ -296,7 +323,6 @@ pub fn start(
 
     let (command_tx, mut command_rx) = RingBuffer::<Command>::new(QUEUE);
     let (mut event_tx, event_rx) = RingBuffer::<EngineEvent>::new(QUEUE);
-    let (mut capture_tx, mut capture_rx) = RingBuffer::<f32>::new(INPUT_RING);
     let xruns = Arc::new(Xruns::default());
 
     // Shutdown-only handoff (see HandoffAudioSide doc comment): the only
@@ -312,27 +338,44 @@ pub fn start(
         rx: engine_rx,
     };
 
-    // Optional capture stream. Its only job is to hand mono samples to
-    // the output callback.
+    // Optional capture stream: one ring per track, fed from a distinct
+    // device channel starting at channel_offset. Tracks beyond however
+    // many channels the device actually has get no ring at all and
+    // record silence rather than a duplicate of another track's input.
     let input_device =
         pick(host.input_devices()?, input_name).or_else(|| host.default_input_device());
-    let (input_stream, input_name_used) = match input_device {
-        None => (None, None),
+    let (input_stream, input_name_used, mut track_capture_rx) = match input_device {
+        None => (None, None, Vec::new()),
         Some(device) => {
             let name = device.to_string();
+            let max_channels = max_input_channels(&device)?;
+            let wanted = (channel_offset as u16).saturating_add(NUM_TRACKS as u16);
+            let total_channels = max_channels.min(wanted).max(1);
+            let active_tracks = (total_channels as usize)
+                .saturating_sub(channel_offset)
+                .min(NUM_TRACKS);
             let in_config = StreamConfig {
-                channels: 1,
+                channels: total_channels,
                 sample_rate: porta_engine::SAMPLE_RATE,
                 buffer_size: BufferSize::Fixed(period as u32),
             };
+            let mut capture_tx = Vec::with_capacity(active_tracks);
+            let mut capture_rx = Vec::with_capacity(active_tracks);
+            for _ in 0..active_tracks {
+                let (tx, rx) = RingBuffer::<f32>::new(INPUT_RING);
+                capture_tx.push(tx);
+                capture_rx.push(rx);
+            }
             let counters = Arc::clone(&xruns);
+            let frame_stride = total_channels as usize;
             let stream = device.build_input_stream(
                 in_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    for &s in data {
-                        if capture_tx.push(s).is_err() {
-                            counters.dropped.fetch_add(1, Ordering::Relaxed);
-                            break;
+                    for frame in data.chunks_exact(frame_stride) {
+                        for (t, tx) in capture_tx.iter_mut().enumerate() {
+                            if tx.push(frame[channel_offset + t]).is_err() {
+                                counters.dropped.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     }
                 },
@@ -340,13 +383,14 @@ pub fn start(
                 None,
             )?;
             stream.play()?;
-            (Some(stream), Some(name))
+            (Some(stream), Some(name), capture_rx)
         }
     };
+    let input_tracks = track_capture_rx.len();
 
     // Everything the output callback touches is allocated here, before
     // the stream starts (REQ-902).
-    let mut captured = vec![0.0f32; MAX_PERIOD];
+    let mut captured: Vec<Vec<f32>> = vec![vec![0.0f32; MAX_PERIOD]; NUM_TRACKS];
     let mut mix_l = vec![0.0f32; MAX_PERIOD];
     let mut mix_r = vec![0.0f32; MAX_PERIOD];
     let mut last_state = engine.state();
@@ -373,14 +417,21 @@ pub fn start(
             }
 
             let mut starved = 0u64;
-            for slot in captured[..frames].iter_mut() {
-                match capture_rx.pop() {
-                    Ok(s) => *slot = s,
-                    Err(_) => {
-                        *slot = 0.0;
-                        starved += 1;
+            for (t, rx) in track_capture_rx.iter_mut().enumerate() {
+                for slot in captured[t][..frames].iter_mut() {
+                    match rx.pop() {
+                        Ok(s) => *slot = s,
+                        Err(_) => {
+                            *slot = 0.0;
+                            starved += 1;
+                        }
                     }
                 }
+            }
+            for row in captured[track_capture_rx.len()..].iter_mut() {
+                // No device channel wired to this track: silence, not a
+                // duplicate of another track's input.
+                row[..frames].fill(0.0);
             }
             if starved > 0 {
                 counters.starved.fetch_add(starved, Ordering::Relaxed);
@@ -398,8 +449,8 @@ pub fn start(
                 }
 
                 let want = frames - done;
-                let slice = &captured[done..done + want];
-                let inputs: [&[f32]; NUM_TRACKS] = [slice; NUM_TRACKS];
+                let inputs: [&[f32]; NUM_TRACKS] =
+                    std::array::from_fn(|t| &captured[t][done..done + want]);
                 let n = engine.process_block(&inputs, &mut mix_l[..want], &mut mix_r[..want]);
                 if n == 0 {
                     // Transport parked: the rest of the buffer stays
@@ -447,5 +498,7 @@ pub fn start(
         period,
         input_device: input_name_used,
         output_device,
+        input_tracks,
+        input_channel_offset: channel_offset,
     })
 }
