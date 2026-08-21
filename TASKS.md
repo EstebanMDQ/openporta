@@ -449,6 +449,59 @@ Verification is `cargo test --workspace` plus the noted assertions.
       export - fits inside the window with nothing cut off. `--kiosk`:
       genuine fullscreen, no titlebar, no wf-panel-pi taskbar visible,
       the app owns the whole 800x480 screen.
+      Third follow-up, 2026-08-21, direct feedback plus a real bug
+      chase: reported "not recording, signal looks like it's getting
+      to the app." Root cause, found by re-running the same L6 test
+      that worked earlier in the day: the L6 had been unplugged since,
+      and every device-name lookup silently fell back to cpal's
+      default_input/output pseudo-device (a generic 2-channel stand-in,
+      not the real hardware) instead of erroring when an explicitly
+      named device wasn't found - exactly the kind of bug that reads
+      as "looks connected but isn't." Fixed in realtime.rs
+      (pick_named_or_default: `Some(name)` with no match is now
+      RealtimeError::DeviceNotFound, surfaced through the same error
+      paths --in/--out already used); verified locally that a bogus
+      name now errors clearly and blank still falls back to default.
+      Same session, also direct feedback, a genuine UI overhaul:
+      buttons too small for a touchscreen, low contrast, no light/dark
+      adaptation, faders too small and not positioned like a real
+      mixing console, and (separately raised) wanting an actual device
+      list instead of free-text fields. Landed together since the
+      device-list ask is also what closes the door on the silent-
+      wrong-device bug above:
+      - New Settings view (gear button on the main screen, Back
+        returns) with real cpal device-name dropdowns
+        (realtime::list_device_names, a names-only sibling of the CLI
+        `devices` command) instead of free-text fields - refreshes on
+        open so a device plugged in after launch shows up without a
+        restart. Period/offset/Connect/Disconnect moved here too.
+      - TactileButton (min-height/min-width 46px) on every button that
+        does something, replacing std-widgets' mouse-sized default.
+      - Track/master panel backgrounds and titles switched from
+        hardcoded colors to Slint's `Palette` (alternate-background/
+        foreground), which already tracks the OS light/dark setting -
+        the custom elements just weren't using it before.
+      - Each channel's fader is now a vertical Slider beside its meter
+        (a real channel-strip layout) instead of a small horizontal
+        slider stacked underneath, range changed from -60..6 to
+        -36..12 so unity sits at exactly 3/4 up the travel
+        ((0-(-36))/(12-(-36)) = 0.75) - cut below, up to +12dB of real
+        gain above. Same range on the master fader.
+      One known cosmetic gap, not fixed: writing the device text
+      property from Rust (the Settings view's remembered-device
+      prefill) doesn't move the ComboBox's internal highlighted
+      selection, a documented Slint limitation (current-value writes
+      don't update current-index - slint-ui/slint#11970). The label
+      text itself is bound directly to current-value and displays
+      correctly either way; only the popup's highlight can lag until
+      a real click. Not chased further this pass.
+      Verified for real on the Pi, both windowed and `--kiosk`
+      (fullscreen): tactile buttons visibly bigger, light theme
+      (matching the Pi's current OS setting) reads with good contrast,
+      vertical faders sit beside their meters with the thumb
+      positioned close to the intended 75% mark, and in kiosk mode the
+      entire layout - transport, all 4 tracks, master, save/undo/
+      export - fits the real 800x480 screen without scrolling.
 
 ## Release process
 
@@ -627,13 +680,15 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       Verified for real: ran the exact Exec= command from the
       installed .desktop file by hand on the Pi (not just read the
       file) and screenshotted it - genuine fullscreen, no
-      titlebar/taskbar, matching what boot will actually run. NOT
-      verified: an actual reboot (the real test of "does autostart
-      really fire at login," deliberately not done as a background
-      task - disruptive to hardware in active use, doing by hand when
-      convenient) and the Escape keypress itself (no way to inject a
-      real keystroke into the Pi's session remotely without installing
-      a new tool there, which wasn't done without asking first) - the
-      property/handler wiring compiles clean and is correct by
-      construction, but an actual keypress hasn't confirmed it yet.
+      titlebar/taskbar, matching what boot will actually run.
+      Reboot confirmed for real 2026-08-21, without needing to trigger
+      it as a background task: came back to the Pi mid-session
+      (`uptime` showed it booted 33 minutes earlier) and found
+      `porta-app ui ... --kiosk` already running - autostart fired on
+      its own after a real reboot, exactly as designed. The Escape
+      keypress itself still hasn't been confirmed by an actual
+      keystroke (no way to inject one into the Pi's session remotely
+      without installing a new tool there, not done without asking
+      first) - the property/handler wiring compiles clean and is
+      correct by construction, but wants a real press to be sure.
       Full gate green across all four feature combinations.
