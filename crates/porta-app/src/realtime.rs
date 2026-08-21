@@ -321,6 +321,18 @@ fn pick(devices: impl Iterator<Item = cpal::Device>, wanted: Option<&str>) -> Op
         .find(|d| d.to_string().to_lowercase().contains(&want))
 }
 
+/// The input device `input_name` (or the system default, if `None`)
+/// would actually resolve to - without opening a stream. Which
+/// channel-offset/period to remember (see `device_config`) depends on
+/// which physical device is about to be used, and that has to be known
+/// before negotiating a stream for it, not after.
+pub fn resolve_input_device_name(input_name: Option<&str>) -> Option<String> {
+    let host = cpal::default_host();
+    let device =
+        pick(host.input_devices().ok()?, input_name).or_else(|| host.default_input_device())?;
+    Some(device.to_string())
+}
+
 fn supports_48k(device: &cpal::Device) -> Result<cpal::SupportedStreamConfigRange, RealtimeError> {
     device
         .supported_output_configs()?

@@ -1,6 +1,8 @@
 //! openporta CLI.
 
 #[cfg(feature = "realtime")]
+mod device_config;
+#[cfg(feature = "realtime")]
 mod realtime;
 mod render;
 mod script;
@@ -38,6 +40,11 @@ channels carry something other than a per-track send - e.g. --in-offset
 the offset: run `probe` first, play into one input at a time, and read
 off which channel index actually lights up - interfaces don't always
 order their channels the way you'd expect.
+
+A successful connection remembers its device/period/offset per input
+device (~/.config/openporta/audio.json) and reuses them next time that
+same device is picked, so this only needs figuring out once per
+interface - pass a flag explicitly to override what was remembered.
 
 built with --features ui:
   porta-app ui <dir> [--kiosk]
@@ -169,16 +176,37 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
 
     let dir = args.first().ok_or("live needs a project directory")?;
     let engine = Engine::open(dir).map_err(|e| e.to_string())?;
-    let period = parse_num::<usize>(args, "--period")?;
-    let channel_offset = parse_num::<usize>(args, "--in-offset")?.unwrap_or(0);
-    let mut session = realtime::start(
-        engine,
-        flag(args, "--in"),
-        flag(args, "--out"),
-        period,
-        channel_offset,
-    )
-    .map_err(|e| e.to_string())?;
+    let in_name = flag(args, "--in");
+    let out_name = flag(args, "--out");
+    let period_flag = parse_num::<usize>(args, "--period")?;
+    let offset_flag = parse_num::<usize>(args, "--in-offset")?;
+
+    // A flag always wins; otherwise fall back to whatever was
+    // remembered the last time this same input device connected
+    // successfully (M6.1 - see device_config), then a hardcoded
+    // default. Which remembered settings apply depends on which
+    // physical device --in (or the system default) actually resolves
+    // to, so that has to be worked out before negotiating a stream.
+    let resolved_input_name = realtime::resolve_input_device_name(in_name);
+    let remembered = resolved_input_name
+        .as_deref()
+        .and_then(|name| device_config::DeviceConfig::load().get(name).cloned());
+    let period = period_flag.or(remembered.as_ref().map(|r| r.period));
+    let channel_offset = offset_flag
+        .or(remembered.as_ref().map(|r| r.input_channel_offset))
+        .unwrap_or(0);
+    let out_name = out_name.or(remembered.as_ref().and_then(|r| r.output_device.as_deref()));
+
+    let mut session = realtime::start(engine, in_name, out_name, period, channel_offset)
+        .map_err(|e| e.to_string())?;
+    if let Some(name) = &session.input_device {
+        device_config::DeviceConfig::remember(
+            name,
+            &session.output_device,
+            session.period,
+            session.input_channel_offset,
+        );
+    }
 
     println!("output: {}", session.output_device);
     match session.input_device.as_deref() {

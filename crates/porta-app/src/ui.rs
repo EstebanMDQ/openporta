@@ -331,6 +331,17 @@ fn connect(
                 session.output_device,
                 session.input_device.as_deref().unwrap_or("(none)")
             );
+            // Remember what worked (M6.1) so next launch pre-fills it -
+            // see connect_audio's startup pre-fill and device_config's
+            // module doc comment.
+            if let Some(name) = &session.input_device {
+                crate::device_config::DeviceConfig::remember(
+                    name,
+                    &session.output_device,
+                    session.period,
+                    session.input_channel_offset,
+                );
+            }
             *slot = Some(Backend::Live(Box::new(LiveState::from_snapshot(
                 session, &snap,
             ))));
@@ -430,6 +441,8 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
     // directory the process happened to be launched from.
     ui.set_export_path(default_export_path(dir).into());
     ui.set_cassette_path(dir.into());
+    #[cfg(feature = "realtime")]
+    prefill_remembered_audio_settings(&ui);
 
     connect_transport(&ui, &backend);
     connect_cassette(&ui, &backend);
@@ -701,6 +714,28 @@ fn connect_cassette(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             refresh(&ui, &slot.as_ref().unwrap().snapshot());
         });
     }
+}
+
+/// Pre-fills the output/period/offset fields from whatever was
+/// remembered (M6.1) for the input device blank fields resolve to -
+/// the input field itself stays blank, since "blank = default" is
+/// exactly what picked that device in the first place. A fresh
+/// install with nothing remembered yet leaves main.slint's own
+/// hardcoded defaults untouched.
+#[cfg(feature = "realtime")]
+fn prefill_remembered_audio_settings(ui: &MainWindow) {
+    let Some(name) = crate::realtime::resolve_input_device_name(None) else {
+        return;
+    };
+    let config = crate::device_config::DeviceConfig::load();
+    let Some(remembered) = config.get(&name) else {
+        return;
+    };
+    if let Some(output) = &remembered.output_device {
+        ui.set_output_device_text(output.clone().into());
+    }
+    ui.set_period_text(remembered.period.to_string().into());
+    ui.set_channel_offset_text(remembered.input_channel_offset.to_string().into());
 }
 
 /// Connect/Disconnect always exist so a `ui`-only build (no
