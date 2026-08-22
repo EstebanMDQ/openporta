@@ -36,7 +36,6 @@ pub struct Entry {
     pub track: usize,
     pub start: usize,
     pub len: usize,
-    pub file: String,
 }
 
 impl Entry {
@@ -56,19 +55,23 @@ pub struct Journal {
     /// its doc comment). `flush_pending` writes them out; `save`,
     /// `undo`, and `redo` all call it first, since none of those ever
     /// run on the realtime audio thread.
-    pending_writes: Vec<(u64, Vec<Vec<i16>>)>,
+    pending_writes: Vec<(u64, usize, Vec<Vec<i16>>)>,
     pending_deletes: Vec<u64>,
-    /// Pre-reserved chunk buffers handed out to new passes via
-    /// `take_spares` and replenished by `flush_pending` as passes are
-    /// written to disk - see `CHUNK_POOL_PER_TRACK`.
-    chunk_pool: Vec<Vec<i16>>,
+    /// One pre-reserved reserve of chunk buffers per track (see
+    /// `CHUNK_POOL_PER_TRACK`) - `take_spares` hands a track's whole
+    /// reserve over in one move (genuinely zero-allocation: it takes
+    /// ownership of an already-allocated `Vec`, leaving an empty one
+    /// behind, rather than constructing a new container). `push_pass`
+    /// gives back whatever a closed pass didn't use immediately (also a
+    /// move); `flush_pending` gives back what it did use, cleared, once
+    /// written to disk.
+    chunk_pool: [Vec<Vec<i16>>; NUM_TRACKS],
 }
 
 impl Journal {
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self, UndoError> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
-        let pool_target = CHUNK_POOL_PER_TRACK * NUM_TRACKS;
         Ok(Self {
             dir,
             undo: Vec::new(),
@@ -78,20 +81,25 @@ impl Journal {
             max_bytes: DEFAULT_MAX_BYTES,
             pending_writes: Vec::new(),
             pending_deletes: Vec::new(),
-            chunk_pool: (0..pool_target)
-                .map(|_| Vec::with_capacity(CHUNK_SAMPLES))
-                .collect(),
+            chunk_pool: std::array::from_fn(|_| {
+                (0..CHUNK_POOL_PER_TRACK)
+                    .map(|_| Vec::with_capacity(CHUNK_SAMPLES))
+                    .collect()
+            }),
         })
     }
 
-    /// Hand out up to `want` pre-reserved chunk buffers for a new pass -
-    /// realtime-safe (draining the pool, no allocation). Returns fewer
-    /// than `want`, possibly zero, if the pool doesn't have that many
-    /// left; the caller (`RecordPass`) falls back to an ordinary
-    /// allocation for the shortfall.
-    pub fn take_spares(&mut self, want: usize) -> Vec<Vec<i16>> {
-        let n = want.min(self.chunk_pool.len());
-        self.chunk_pool.split_off(self.chunk_pool.len() - n)
+    /// Hand `track`'s whole chunk-buffer reserve over to a new pass -
+    /// realtime-safe: `mem::take` moves the already-allocated `Vec` out
+    /// wholesale (no allocation, no partial-take container to build),
+    /// leaving an empty reserve behind until this pass closes and
+    /// returns what it didn't use (`push_pass`) or `flush_pending`
+    /// returns what it did. Empty if the reserve is already out (e.g.
+    /// re-arming and recording again before the previous pass on this
+    /// track has closed - can't happen through `Engine::record()`
+    /// today, but `take_spares` itself doesn't assume it).
+    pub fn take_spares(&mut self, track: usize) -> Vec<Vec<i16>> {
+        std::mem::take(&mut self.chunk_pool[track])
     }
 
     pub fn with_caps(mut self, max_passes: usize, max_bytes: u64) -> Self {
@@ -144,7 +152,7 @@ impl Journal {
     }
 
     fn read_payload(&self, entry: &Entry) -> Result<Vec<i16>, UndoError> {
-        let mut f = fs::File::open(self.dir.join(&entry.file))?;
+        let mut f = fs::File::open(self.path_for(entry.id))?;
         let mut bytes = Vec::new();
         f.read_to_end(&mut bytes)?;
         Ok(bytes
@@ -156,41 +164,44 @@ impl Journal {
     /// Record a completed pass. Does no I/O and cannot fail - the
     /// payload is kept in memory and its disk write deferred to
     /// `flush_pending`, so this is safe to call from the realtime audio
-    /// thread (REQ-902). Clears the redo stack, as any new take
-    /// invalidates the branch that was undone; those payloads are
-    /// dropped from `pending_writes` if never flushed, or queued for
-    /// deletion if they already made it to disk.
-    pub fn push_pass(&mut self, pass: RecordPass) {
+    /// thread (REQ-902). Also returns whatever chunk buffers the pass
+    /// reserved but never wrote into - a plain move back into
+    /// `chunk_pool`, not an allocation - so a track's reserve doesn't
+    /// shrink every time it records less than its full share; without
+    /// this, ordinary use drains the pool to nothing within a handful of
+    /// takes (found in review, not by design). Clears the redo stack, as
+    /// any new take invalidates the branch that was undone; those
+    /// payloads are dropped from `pending_writes` if never flushed, or
+    /// queued for deletion if they already made it to disk.
+    pub fn push_pass(&mut self, mut pass: RecordPass) {
         for e in self.redo.drain(..) {
-            if self.pending_writes.iter().any(|(id, _)| *id == e.id) {
-                self.pending_writes.retain(|(id, _)| *id != e.id);
+            if self.pending_writes.iter().any(|(id, ..)| *id == e.id) {
+                self.pending_writes.retain(|(id, ..)| *id != e.id);
             } else {
                 self.pending_deletes.push(e.id);
             }
         }
+        let track = pass.track;
+        // `chunk_pool[track]` is guaranteed empty here: `take_spares`
+        // emptied it when this pass opened, and only one pass per track
+        // can be open at a time, so nothing else could have refilled it
+        // since.
+        self.chunk_pool[track] = pass.take_unused_spares();
         if pass.is_empty() {
             return;
         }
         let id = self.next_id;
         self.next_id += 1;
-        let file = self
-            .path_for(id)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let track = pass.track;
         let start = pass.start;
         let len = pass.len();
         // `into_chunks` just moves already-allocated chunk buffers into
         // `pending_writes` - no allocation of the sample data itself.
-        self.pending_writes.push((id, pass.into_chunks()));
+        self.pending_writes.push((id, track, pass.into_chunks()));
         self.undo.push(Entry {
             id,
             track,
             start,
             len,
-            file,
         });
         self.evict();
     }
@@ -202,8 +213,8 @@ impl Journal {
         while self.undo.len() > self.max_passes || (total > self.max_bytes && self.undo.len() > 1) {
             let e = self.undo.remove(0);
             total -= e.bytes();
-            if self.pending_writes.iter().any(|(id, _)| *id == e.id) {
-                self.pending_writes.retain(|(id, _)| *id != e.id);
+            if self.pending_writes.iter().any(|(id, ..)| *id == e.id) {
+                self.pending_writes.retain(|(id, ..)| *id != e.id);
             } else {
                 self.pending_deletes.push(e.id);
             }
@@ -219,18 +230,20 @@ impl Journal {
         for id in std::mem::take(&mut self.pending_deletes) {
             let _ = fs::remove_file(self.path_for(id));
         }
-        let pool_target = CHUNK_POOL_PER_TRACK * NUM_TRACKS;
-        for (id, chunks) in std::mem::take(&mut self.pending_writes) {
+        for (id, track, chunks) in std::mem::take(&mut self.pending_writes) {
             self.write_payload_chunks(id, &chunks)?;
             // Reclaim each chunk's already-reserved capacity back into
-            // the pool (up to its target size) instead of dropping it -
-            // the only place buffers return to `take_spares`'s reserve,
-            // since nothing else safely touches the engine while a
-            // realtime session owns it. See record.rs's module doc.
+            // its track's reserve (up to its target size) instead of
+            // dropping it - alongside `push_pass`'s immediate return of
+            // never-used spares, this is how `chunk_pool` stays
+            // replenished across a whole session without ever touching
+            // the realtime thread. See record.rs's module doc.
             for mut chunk in chunks {
                 chunk.clear();
-                if chunk.capacity() >= CHUNK_SAMPLES && self.chunk_pool.len() < pool_target {
-                    self.chunk_pool.push(chunk);
+                if chunk.capacity() >= CHUNK_SAMPLES
+                    && self.chunk_pool[track].len() < CHUNK_POOL_PER_TRACK
+                {
+                    self.chunk_pool[track].push(chunk);
                 }
             }
         }

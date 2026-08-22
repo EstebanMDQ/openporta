@@ -22,23 +22,32 @@
 //! (found while investigating the stereo-bounce proposal's REQ-902
 //! question).
 //!
-//! `Journal` hands a new pass a small reserve of pre-allocated chunk
-//! buffers (`spares`, see `with_spares`) up front, at pass-start; as
-//! `current` fills, a fresh chunk comes from `spares` with no
-//! allocation. There is deliberately no attempt to refill `spares`
-//! *during* a live pass - `Engine` is exclusively owned by the realtime
-//! thread while a session is connected (the same reason blocking
-//! commands like Save/Undo fully disconnect first), so nothing can hand
-//! more buffers over mid-pass without its own background thread and
-//! wait-free queues. Instead the reserve is generous (`CHUNK_POOL_PER_TRACK`
-//! chunks per track, ~2 minutes of continuous recording) and replenished
-//! at the existing off-thread touchpoint (`Journal::flush_pending`, run
-//! by Save/Undo/Redo) as passes are written out. A single pass longer
-//! than its reserve, with nothing flushing in between, falls back to an
-//! ordinary allocation for the overflow rather than corrupting undo data
-//! or refusing to record - rare in practice (most takes are far shorter
-//! than 2 minutes), and counted via `allocated_on_thread` rather than
-//! silently swallowed.
+//! `Journal` hands a new pass its whole track's reserve of pre-allocated
+//! chunk buffers (`spares`, see `with_spares`) up front, at pass-start -
+//! one `mem::take` moving an already-allocated `Vec` wholesale, not a
+//! per-pass allocation of its own; as `current` fills, a fresh chunk
+//! comes from `spares` with no allocation either. There is deliberately
+//! no attempt to refill `spares` *during* a live pass - `Engine` is
+//! exclusively owned by the realtime thread while a session is
+//! connected (the same reason blocking commands like Save/Undo fully
+//! disconnect first), so nothing can hand more buffers over mid-pass
+//! without its own background thread and wait-free queues. Instead each
+//! track keeps its own dedicated reserve (`CHUNK_POOL_PER_TRACK` chunks,
+//! ~2 minutes of continuous recording), given back in full by
+//! `Journal::push_pass` the instant a pass closes (whatever it didn't
+//! use) and replenished further, chunk by chunk, at the existing
+//! off-thread touchpoint (`Journal::flush_pending`, run by Save/Undo/
+//! Redo) as passes are written out - both plain moves, not allocations,
+//! which is what keeps a track's reserve from draining to nothing after
+//! a handful of ordinary takes (an earlier version of this fix got that
+//! wrong: it only ever gave back the chunks a pass *used*, never the
+//! ones it reserved and didn't, so the reserve shrank on every pass
+//! regardless of length - caught in review, fixed here). A single pass
+//! longer than its own reserve, with nothing flushing in between, falls
+//! back to an ordinary allocation for the overflow rather than
+//! corrupting undo data or refusing to record - rare in practice (most
+//! takes are far shorter than 2 minutes), and counted via
+//! `allocated_on_thread` rather than silently swallowed.
 
 use crate::tape::{Tape, CHUNK_SAMPLES};
 use porta_dsp::SAMPLE_RATE;
@@ -136,9 +145,22 @@ impl RecordPass {
         spares: Vec<Vec<i16>>,
     ) -> Self {
         let mut p = Self::new(track, start, seed);
+        // Enough capacity for every spare handed in plus the one
+        // `current` will hold once `chunks` starts closing them out, so
+        // `chunks.push` in `write_block` never reallocates within a
+        // pass that stays inside its reserve.
+        p.chunks.reserve_exact(spares.len() + 1);
         p.spares = spares;
         p.scratch.reserve_exact(max_block.max(XFADE_SAMPLES));
         p
+    }
+
+    /// Give back whatever chunk buffers this pass reserved but never
+    /// wrote into - called by `Journal::push_pass` so a track's reserve
+    /// doesn't shrink every time it records less than its full share.
+    /// A plain move, not an allocation.
+    pub fn take_unused_spares(&mut self) -> Vec<Vec<i16>> {
+        std::mem::take(&mut self.spares)
     }
 
     /// Samples written so far.

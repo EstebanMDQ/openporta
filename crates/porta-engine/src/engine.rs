@@ -12,7 +12,7 @@ use crate::project::{Manifest, Project, ProjectError};
 use crate::record::RecordPass;
 use crate::tape::Tape;
 use crate::transport::{Transport, TransportState};
-use crate::undo::{Journal, UndoError, CHUNK_POOL_PER_TRACK};
+use crate::undo::{Journal, UndoError};
 use crate::NUM_TRACKS;
 use porta_dsp::character::TapeCharacter;
 use porta_dsp::{AudioProcessor, Chain, MAX_BLOCK};
@@ -250,11 +250,11 @@ impl Engine {
             if self.armed[t] && self.passes[t].is_none() {
                 let seed = seed_for(self.project.manifest.noise_seed, self.pass_counter);
                 self.pass_counter += 1;
-                // Pre-reserved chunks from the journal's pool, not a
+                // This track's whole chunk-buffer reserve, not a
                 // reserve_exact sized to the whole remaining tape - this
                 // runs on the realtime audio thread (REQ-902; see
                 // record.rs's module doc comment).
-                let spares = self.journal.take_spares(CHUNK_POOL_PER_TRACK);
+                let spares = self.journal.take_spares(t);
                 self.passes[t] = Some(RecordPass::with_spares(t, start, seed, MAX_BLOCK, spares));
                 // A fresh chain per pass: flutter and hiss get their own
                 // seed so successive generations decorrelate (REQ-304).
@@ -446,6 +446,33 @@ mod tests {
             fed = end;
         }
         left
+    }
+
+    #[test]
+    fn unused_spares_return_to_the_pool_so_short_takes_never_fall_back() {
+        // Regression for a real bug found in review: an earlier version
+        // of the chunk-pool fix only ever gave back the chunks a pass
+        // *used*, never the ones it reserved and didn't - so a track's
+        // reserve shrank by its whole per-pass share on every take,
+        // regardless of length, and a handful of short takes (with no
+        // Save/Undo in between - the only thing that would otherwise
+        // replenish it) was enough to exhaust it. Ten short takes, well
+        // under CHUNK_POOL_PER_TRACK each, must all stay allocation-free
+        // on the strength of push_pass's immediate give-back alone.
+        let dir = TempDir::new("spares-return");
+        let mut e =
+            Engine::create_with_character(&dir.0, 48_000 * 60 * 5, TapeCharacter::clean()).unwrap();
+        for i in 0..10 {
+            e.set_armed(0, true);
+            e.record();
+            run(&mut e, 0, &sine(440.0, -6.0, 4_800), 512); // 0.1s, far under one chunk
+            e.stop();
+            assert_eq!(
+                e.pass_buffer_fallbacks(),
+                0,
+                "take {i} fell back to an on-thread allocation - the chunk reserve leaked"
+            );
+        }
     }
 
     #[test]

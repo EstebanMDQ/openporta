@@ -218,6 +218,39 @@ Verification is `cargo test --workspace` plus the noted assertions.
       have made the original violation worse - two channels instead of
       one) but stands on its own: it fixes a real, pre-existing bug in
       ordinary track recording, unrelated to whether bounce ever ships.
+      **Follow-up fix, same day**: a fourth spec-review pass (still on
+      the bounce proposal, but checking the shipped code directly rather
+      than trusting the design doc) found the fix above didn't actually
+      hold up in steady state. `Journal::push_pass` only ever returned
+      the chunks a pass *used* back toward the reserve, never the ones
+      it took but didn't write into - so a track's 24-chunk reserve
+      shrank by its whole per-pass share on *every* record engagement
+      regardless of length, and about 4 short takes with no intervening
+      Save/Undo was enough to drain it to zero. Also caught: `take_spares`
+      used `Vec::split_off`, which allocates a new container despite a
+      doc comment claiming otherwise; `push_pass` computed each entry's
+      filename via `format!`+`PathBuf::join`+`to_string` on the realtime
+      thread; `RecordPass.chunks` was never pre-reserved. Fixed properly:
+      the pool is now one dedicated reserve per track (`[Vec<Vec<i16>>;
+      NUM_TRACKS]`), handed out and returned via `mem::take`/plain moves
+      (genuinely zero-allocation, not just "small"); `push_pass` gives
+      back whatever a pass didn't use *immediately*, not just what
+      eventually flushes; `Entry.file` is gone entirely (the filename is
+      always derived from `id` via the existing `path_for`, so there was
+      nothing to compute or store) - serde-compatible with old journals,
+      since removing a field is a no-op for deserialization, not a
+      breaking one. New regression test
+      (unused_spares_return_to_the_pool_so_short_takes_never_fall_back,
+      engine.rs): ten short takes on one track, no Save/Undo between any
+      of them, all assert zero fallbacks - would have failed against the
+      first version of this fix within 2 takes. Full gate green, golden
+      render still byte-exact.
+      Not yet done, flagged by the same review as the real way to make
+      this invariant load-bearing rather than inferred: a global-
+      allocator-backed counting test around record()/process_block()/
+      stop() that would catch ANY future realtime-thread allocation
+      directly, not just regressions in this specific pool mechanism.
+      Worth its own task if this keeps mattering.
 - [x] M4.5 `live` has no working path to persist anything. Found
       2026-08-20 during the hardware checklist: recorded takes are lost
       the moment the process exits (tape/*.raw and undo/journal.json
