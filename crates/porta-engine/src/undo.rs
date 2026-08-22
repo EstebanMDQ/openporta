@@ -174,19 +174,21 @@ impl Journal {
     /// payloads are dropped from `pending_writes` if never flushed, or
     /// queued for deletion if they already made it to disk.
     pub fn push_pass(&mut self, mut pass: RecordPass) {
-        for e in self.redo.drain(..) {
-            if self.pending_writes.iter().any(|(id, ..)| *id == e.id) {
-                self.pending_writes.retain(|(id, ..)| *id != e.id);
-            } else {
-                self.pending_deletes.push(e.id);
-            }
+        // Indexed, not `drain`, so `release_entry_payload` (which needs
+        // its own `&mut self`) isn't fighting an active borrow of
+        // `self.redo` - and no allocation for a temporary id/track list.
+        for i in 0..self.redo.len() {
+            let (id, track) = (self.redo[i].id, self.redo[i].track);
+            self.release_entry_payload(id, track);
         }
+        self.redo.clear();
         let track = pass.track;
-        // `chunk_pool[track]` is guaranteed empty here: `take_spares`
-        // emptied it when this pass opened, and only one pass per track
-        // can be open at a time, so nothing else could have refilled it
-        // since.
-        self.chunk_pool[track] = pass.take_unused_spares();
+        // `chunk_pool[track]` is empty when nothing above just returned
+        // chunks to it (`take_spares` emptied it when this pass opened,
+        // and only one pass per track can be open at a time) - `extend`
+        // rather than a plain assignment so a same-track redo
+        // invalidation just above doesn't get overwritten.
+        self.chunk_pool[track].extend(pass.take_unused_spares());
         if pass.is_empty() {
             return;
         }
@@ -213,10 +215,41 @@ impl Journal {
         while self.undo.len() > self.max_passes || (total > self.max_bytes && self.undo.len() > 1) {
             let e = self.undo.remove(0);
             total -= e.bytes();
-            if self.pending_writes.iter().any(|(id, ..)| *id == e.id) {
-                self.pending_writes.retain(|(id, ..)| *id != e.id);
-            } else {
-                self.pending_deletes.push(e.id);
+            self.release_entry_payload(e.id, e.track);
+        }
+    }
+
+    /// A payload stops being reachable - either evicted or invalidated
+    /// by a new take overwriting the redo branch. If it's still
+    /// pending (never flushed), its chunk buffers go straight back to
+    /// `track`'s reserve, the same plain move `flush_pending` uses once
+    /// a payload's been written - not dropped, which would both
+    /// deallocate on the realtime thread and permanently shrink the
+    /// reserve (found in review: an earlier version of this function
+    /// did exactly that via `Vec::retain`, silently undoing the give-
+    /// back `push_pass`/`flush_pending` otherwise provide). If it
+    /// already made it to disk, its file is queued for deletion instead
+    /// - real I/O, deferred to `flush_pending`, off the realtime thread.
+    fn release_entry_payload(&mut self, id: u64, track: usize) {
+        if let Some(pos) = self.pending_writes.iter().position(|(pid, ..)| *pid == id) {
+            let (_, _, chunks) = self.pending_writes.remove(pos);
+            self.reclaim_chunks(track, chunks);
+        } else {
+            self.pending_deletes.push(id);
+        }
+    }
+
+    /// Clear and return each chunk to `track`'s reserve, up to its
+    /// target size - shared by `flush_pending` (chunks whose bytes just
+    /// made it to disk) and `release_entry_payload` (chunks that never
+    /// needed to; either way, the reserve gets them back the same way).
+    fn reclaim_chunks(&mut self, track: usize, chunks: Vec<Vec<i16>>) {
+        for mut chunk in chunks {
+            chunk.clear();
+            if chunk.capacity() >= CHUNK_SAMPLES
+                && self.chunk_pool[track].len() < CHUNK_POOL_PER_TRACK
+            {
+                self.chunk_pool[track].push(chunk);
             }
         }
     }
@@ -233,19 +266,12 @@ impl Journal {
         for (id, track, chunks) in std::mem::take(&mut self.pending_writes) {
             self.write_payload_chunks(id, &chunks)?;
             // Reclaim each chunk's already-reserved capacity back into
-            // its track's reserve (up to its target size) instead of
-            // dropping it - alongside `push_pass`'s immediate return of
-            // never-used spares, this is how `chunk_pool` stays
+            // its track's reserve instead of dropping it - alongside
+            // `release_entry_payload`'s immediate return of never-
+            // flushed chunks, this is how `chunk_pool` stays
             // replenished across a whole session without ever touching
             // the realtime thread. See record.rs's module doc.
-            for mut chunk in chunks {
-                chunk.clear();
-                if chunk.capacity() >= CHUNK_SAMPLES
-                    && self.chunk_pool[track].len() < CHUNK_POOL_PER_TRACK
-                {
-                    self.chunk_pool[track].push(chunk);
-                }
-            }
+            self.reclaim_chunks(track, chunks);
         }
         Ok(())
     }
@@ -398,6 +424,48 @@ mod tests {
         let p1 = record(&mut tape, 1, 0, 660.0, 10_000);
         j.push_pass(p1);
         assert!(!j.can_redo(), "new take must invalidate the redo branch");
+    }
+
+    #[test]
+    fn evicting_a_still_pending_entry_returns_its_chunks_to_the_pool() {
+        // Regression for a real bug found in review: evict() used to
+        // drop a still-unflushed entry's chunk buffers via
+        // Vec::retain (deallocating them, on the realtime thread, and
+        // permanently shrinking the reserve) instead of returning them
+        // the same way flush_pending does once they're written.
+        let dir = TempDir::new("evict-pending-give-back");
+        let mut tape = Tape::new(CHUNK_SAMPLES * 3);
+        let mut j = Journal::new(&dir.0).unwrap().with_caps(1, u64::MAX);
+
+        let spares = j.take_spares(0);
+        let reserve_len = spares.len();
+        assert!(
+            reserve_len > 1,
+            "need spares to prove some come back unused"
+        );
+        let mut p0 = RecordPass::with_spares(0, 0, 1, 4096, spares);
+        // Short write: one chunk consumed, the rest of the reserve
+        // stays unused - so give-back has to recover both a used chunk
+        // (via eviction, below) and unused ones (via push_pass itself).
+        p0.write_block(&mut tape, &sine(220.0, -6.0, 100));
+        p0.finish(&mut tape);
+        j.push_pass(p0); // pending: id 0, never flushed
+
+        // A second, non-empty pass on the same track: push_pass reaches
+        // evict() (an empty pass would return early first), and the
+        // cap of 1 forces id 0 out while its payload is still pending.
+        let mut p1 = RecordPass::new(0, 200, 2);
+        p1.write_block(&mut tape, &sine(440.0, -6.0, 100));
+        p1.finish(&mut tape);
+        j.push_pass(p1);
+
+        assert_eq!(j.depth(), 1, "cap enforced");
+        let recovered = j.take_spares(0);
+        assert_eq!(
+            recovered.len(),
+            reserve_len,
+            "the evicted entry's chunk must come back, not be dropped"
+        );
     }
 
     #[test]
