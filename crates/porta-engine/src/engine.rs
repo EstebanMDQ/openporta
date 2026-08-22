@@ -12,7 +12,7 @@ use crate::project::{Manifest, Project, ProjectError};
 use crate::record::RecordPass;
 use crate::tape::Tape;
 use crate::transport::{Transport, TransportState};
-use crate::undo::{Journal, UndoError};
+use crate::undo::{Journal, UndoError, CHUNK_POOL_PER_TRACK};
 use crate::NUM_TRACKS;
 use porta_dsp::character::TapeCharacter;
 use porta_dsp::{AudioProcessor, Chain, MAX_BLOCK};
@@ -41,6 +41,7 @@ pub struct Engine {
     passes: [Option<RecordPass>; NUM_TRACKS],
     chains: Vec<Chain>,
     pass_counter: u64,
+    pass_buffer_fallbacks: u64,
     // Per-track scratch: processed input (record path) and tape playback.
     processed: Vec<Vec<f32>>,
     playback: Vec<Vec<f32>>,
@@ -92,6 +93,7 @@ impl Engine {
             // keeps the array populated while stopped.
             chains: (0..NUM_TRACKS).map(|_| Chain::passthrough()).collect(),
             pass_counter: 0,
+            pass_buffer_fallbacks: 0,
             processed: vec![vec![0.0; MAX_BLOCK]; NUM_TRACKS],
             playback: vec![vec![0.0; MAX_BLOCK]; NUM_TRACKS],
         })
@@ -244,14 +246,16 @@ impl Engine {
             return;
         }
         let start = self.transport.playhead();
-        let capacity = self.tape.len_samples().saturating_sub(start);
         for t in 0..NUM_TRACKS {
             if self.armed[t] && self.passes[t].is_none() {
                 let seed = seed_for(self.project.manifest.noise_seed, self.pass_counter);
                 self.pass_counter += 1;
-                self.passes[t] = Some(RecordPass::with_capacity(
-                    t, start, seed, capacity, MAX_BLOCK,
-                ));
+                // Pre-reserved chunks from the journal's pool, not a
+                // reserve_exact sized to the whole remaining tape - this
+                // runs on the realtime audio thread (REQ-902; see
+                // record.rs's module doc comment).
+                let spares = self.journal.take_spares(CHUNK_POOL_PER_TRACK);
+                self.passes[t] = Some(RecordPass::with_spares(t, start, seed, MAX_BLOCK, spares));
                 // A fresh chain per pass: flutter and hiss get their own
                 // seed so successive generations decorrelate (REQ-304).
                 self.chains[t] = self.project.manifest.character.build_chain(seed);
@@ -271,9 +275,21 @@ impl Engine {
         for t in 0..NUM_TRACKS {
             if let Some(mut pass) = self.passes[t].take() {
                 pass.finish(&mut self.tape);
+                if pass.allocated_on_thread {
+                    self.pass_buffer_fallbacks += 1;
+                }
                 self.journal.push_pass(pass);
             }
         }
+    }
+
+    /// How many times a record pass has had to fall back to an ordinary
+    /// allocation because the journal's pre-reserved chunk pool ran dry
+    /// (see `record.rs`'s module doc comment) - should stay at 0 in
+    /// ordinary use; a non-zero count is a real, honest signal, not a
+    /// crash or silently-wrong undo data.
+    pub fn pass_buffer_fallbacks(&self) -> u64 {
+        self.pass_buffer_fallbacks
     }
 
     /// Process one block. `inputs` supplies live input per track (only

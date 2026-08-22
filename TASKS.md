@@ -175,6 +175,49 @@ Verification is `cargo test --workspace` plus the noted assertions.
       Needs hardware re-verification: repeat the manual checklist's
       record/stop step and confirm the xrun summary is actually zero at
       --period 256 now.
+      **Closed the flagged reserve_exact gap, 2026-08-22**, resurfaced by
+      spec review of the stereo-bounce proposal (openspec/changes/001):
+      Command::Record is also non-blocking, so RecordPass::with_capacity's
+      reserve_exact (up to the whole remaining tape - ~172.8MB for one
+      mono track at 30 minutes) ran on the realtime thread on every
+      record engagement, not just the Stop path M4.4 already fixed.
+      record.rs's module doc comment has the full design; the short
+      version: displaced audio is now captured in fixed-size chunks
+      (tape::CHUNK_SAMPLES, 5s, matching REQ-802's own save granularity)
+      instead of one reserve_exact'd buffer. Journal hands each new pass
+      a reserve of pre-allocated chunks (24/track, ~2 minutes of
+      continuous recording) up front; a rollover mid-pass just pops the
+      next one, no allocation. Deliberately not live-refilled during a
+      session - Engine is exclusively realtime-thread-owned while
+      connected (the same reason Save/Undo fully disconnect first), so
+      there's no safe off-thread moment to hand more buffers over
+      without a dedicated background thread and wait-free queues, which
+      was considered and explicitly scoped out for now (asked directly;
+      the smaller fix was preferred over that new subsystem). Instead
+      the reserve replenishes at the existing off-thread touchpoint
+      (Journal::flush_pending, run by Save/Undo/Redo) as passes are
+      written to disk. A single pass longer than 2 minutes with nothing
+      flushing in between falls back to an ordinary allocation for the
+      overflow - rare in practice, counted via a new
+      Engine::pass_buffer_fallbacks() rather than silently corrupting
+      undo data or refusing to record. Also fixed in the same pass:
+      RecordPass::finish()'s punch-out fade did an unnecessary
+      `.to_vec()` copy of its own already-computed scratch buffer before
+      writing it to tape - deleted, writes the slice directly.
+      Journal's on-disk format is unchanged (chunks are written to the
+      same one-file-per-pass layout, just via several small sequential
+      writes instead of one big pre-concatenated buffer), so no
+      migration concern for existing cassettes.
+      New tests: a multi-chunk pass round-trips through undo byte-
+      exactly (record.rs); a pass with enough spares to cover its length
+      never falls back (record.rs). All pre-existing tests pass
+      unchanged, including the golden render (byte-exact) and the full
+      generation-loss suite - the refactor is behaviorally transparent.
+      Full gate green across all four feature combinations.
+      This was prerequisite work for the bounce proposal (which would
+      have made the original violation worse - two channels instead of
+      one) but stands on its own: it fixes a real, pre-existing bug in
+      ordinary track recording, unrelated to whether bounce ever ships.
 - [x] M4.5 `live` has no working path to persist anything. Found
       2026-08-20 during the hardware checklist: recorded takes are lost
       the moment the process exits (tape/*.raw and undo/journal.json

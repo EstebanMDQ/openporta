@@ -4,7 +4,8 @@
 //! buttons only, no history browser (REQ-505).
 
 use crate::record::RecordPass;
-use crate::tape::Tape;
+use crate::tape::{Tape, CHUNK_SAMPLES};
+use crate::NUM_TRACKS;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,14 @@ use std::path::{Path, PathBuf};
 /// Default journal caps. Both bound the stack; whichever binds first wins.
 pub const DEFAULT_MAX_PASSES: usize = 32;
 pub const DEFAULT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Chunk buffers (`tape::CHUNK_SAMPLES` samples each) the pool starts
+/// with per track: ~2 minutes of continuous recording (24 chunks x 5s).
+/// See `record.rs`'s module doc comment for the realtime-safety
+/// reasoning - this is a fixed, generous reserve, not a live-refilled
+/// pool, so a pass beyond its share falls back to an ordinary
+/// allocation for the overflow rather than corrupting undo data.
+pub const CHUNK_POOL_PER_TRACK: usize = 24;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UndoError {
@@ -47,14 +56,19 @@ pub struct Journal {
     /// its doc comment). `flush_pending` writes them out; `save`,
     /// `undo`, and `redo` all call it first, since none of those ever
     /// run on the realtime audio thread.
-    pending_writes: Vec<(u64, Vec<i16>)>,
+    pending_writes: Vec<(u64, Vec<Vec<i16>>)>,
     pending_deletes: Vec<u64>,
+    /// Pre-reserved chunk buffers handed out to new passes via
+    /// `take_spares` and replenished by `flush_pending` as passes are
+    /// written to disk - see `CHUNK_POOL_PER_TRACK`.
+    chunk_pool: Vec<Vec<i16>>,
 }
 
 impl Journal {
     pub fn new(dir: impl Into<PathBuf>) -> Result<Self, UndoError> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
+        let pool_target = CHUNK_POOL_PER_TRACK * NUM_TRACKS;
         Ok(Self {
             dir,
             undo: Vec::new(),
@@ -64,7 +78,20 @@ impl Journal {
             max_bytes: DEFAULT_MAX_BYTES,
             pending_writes: Vec::new(),
             pending_deletes: Vec::new(),
+            chunk_pool: (0..pool_target)
+                .map(|_| Vec::with_capacity(CHUNK_SAMPLES))
+                .collect(),
         })
+    }
+
+    /// Hand out up to `want` pre-reserved chunk buffers for a new pass -
+    /// realtime-safe (draining the pool, no allocation). Returns fewer
+    /// than `want`, possibly zero, if the pool doesn't have that many
+    /// left; the caller (`RecordPass`) falls back to an ordinary
+    /// allocation for the shortfall.
+    pub fn take_spares(&mut self, want: usize) -> Vec<Vec<i16>> {
+        let n = want.min(self.chunk_pool.len());
+        self.chunk_pool.split_off(self.chunk_pool.len() - n)
     }
 
     pub fn with_caps(mut self, max_passes: usize, max_bytes: u64) -> Self {
@@ -96,6 +123,23 @@ impl Journal {
             bytes.extend_from_slice(&s.to_le_bytes());
         }
         f.write_all(&bytes)?;
+        Ok(())
+    }
+
+    /// Same as `write_payload`, but for a pass's chunked capture
+    /// (`RecordPass::into_chunks`) - writes each chunk's bytes in order
+    /// without concatenating them into one buffer first. Both produce
+    /// byte-identical files; `read_payload` doesn't need to know or
+    /// care which wrote a given one.
+    fn write_payload_chunks(&self, id: u64, chunks: &[Vec<i16>]) -> Result<(), UndoError> {
+        let mut f = fs::File::create(self.path_for(id))?;
+        for chunk in chunks {
+            let mut bytes = Vec::with_capacity(chunk.len() * 2);
+            for &s in chunk {
+                bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            f.write_all(&bytes)?;
+        }
         Ok(())
     }
 
@@ -135,12 +179,16 @@ impl Journal {
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_string();
-        let len = pass.displaced.len();
-        self.pending_writes.push((id, pass.displaced));
+        let track = pass.track;
+        let start = pass.start;
+        let len = pass.len();
+        // `into_chunks` just moves already-allocated chunk buffers into
+        // `pending_writes` - no allocation of the sample data itself.
+        self.pending_writes.push((id, pass.into_chunks()));
         self.undo.push(Entry {
             id,
-            track: pass.track,
-            start: pass.start,
+            track,
+            start,
             len,
             file,
         });
@@ -171,8 +219,20 @@ impl Journal {
         for id in std::mem::take(&mut self.pending_deletes) {
             let _ = fs::remove_file(self.path_for(id));
         }
-        for (id, samples) in std::mem::take(&mut self.pending_writes) {
-            self.write_payload(id, &samples)?;
+        let pool_target = CHUNK_POOL_PER_TRACK * NUM_TRACKS;
+        for (id, chunks) in std::mem::take(&mut self.pending_writes) {
+            self.write_payload_chunks(id, &chunks)?;
+            // Reclaim each chunk's already-reserved capacity back into
+            // the pool (up to its target size) instead of dropping it -
+            // the only place buffers return to `take_spares`'s reserve,
+            // since nothing else safely touches the engine while a
+            // realtime session owns it. See record.rs's module doc.
+            for mut chunk in chunks {
+                chunk.clear();
+                if chunk.capacity() >= CHUNK_SAMPLES && self.chunk_pool.len() < pool_target {
+                    self.chunk_pool.push(chunk);
+                }
+            }
         }
         Ok(())
     }

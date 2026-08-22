@@ -10,9 +10,39 @@
 //! applied as audio is written, the out-fade is applied retroactively to
 //! the tail of the written region when the pass closes, blending back
 //! toward the displaced content.
+//!
+//! # Realtime-safe capture (REQ-902)
+//!
+//! Displaced audio is captured in fixed-size chunks (`tape::CHUNK_SAMPLES`,
+//! matching REQ-802's own tape-save granularity) instead of one buffer
+//! reserved for the whole remaining tape - `Command::Record` is not a
+//! blocking command, so `Engine::record()` and every `write_block` call
+//! run directly on the realtime audio thread, and a `reserve_exact` sized
+//! to up to 30 minutes of tape there is a genuine REQ-902 violation
+//! (found while investigating the stereo-bounce proposal's REQ-902
+//! question).
+//!
+//! `Journal` hands a new pass a small reserve of pre-allocated chunk
+//! buffers (`spares`, see `with_spares`) up front, at pass-start; as
+//! `current` fills, a fresh chunk comes from `spares` with no
+//! allocation. There is deliberately no attempt to refill `spares`
+//! *during* a live pass - `Engine` is exclusively owned by the realtime
+//! thread while a session is connected (the same reason blocking
+//! commands like Save/Undo fully disconnect first), so nothing can hand
+//! more buffers over mid-pass without its own background thread and
+//! wait-free queues. Instead the reserve is generous (`CHUNK_POOL_PER_TRACK`
+//! chunks per track, ~2 minutes of continuous recording) and replenished
+//! at the existing off-thread touchpoint (`Journal::flush_pending`, run
+//! by Save/Undo/Redo) as passes are written out. A single pass longer
+//! than its reserve, with nothing flushing in between, falls back to an
+//! ordinary allocation for the overflow rather than corrupting undo data
+//! or refusing to record - rare in practice (most takes are far shorter
+//! than 2 minutes), and counted via `allocated_on_thread` rather than
+//! silently swallowed.
 
-use crate::tape::Tape;
+use crate::tape::{Tape, CHUNK_SAMPLES};
 use porta_dsp::SAMPLE_RATE;
+use std::collections::VecDeque;
 
 /// Punch crossfade length: 5ms.
 pub const XFADE_SAMPLES: usize = (SAMPLE_RATE as usize) * 5 / 1000;
@@ -50,12 +80,29 @@ impl Dither {
     }
 }
 
-/// An open or closed record pass. `displaced` holds the tape content that
-/// the pass overwrote, in order, starting at `start`.
+/// An open or closed record pass. Displaced tape content (what the pass
+/// overwrote) is captured in fixed-size chunks - `chunks` holds closed
+/// ones in order, `current` the one still being filled. See the module
+/// doc comment for why.
 pub struct RecordPass {
     pub track: usize,
     pub start: usize,
-    pub displaced: Vec<i16>,
+    chunks: Vec<Vec<i16>>,
+    current: Vec<i16>,
+    total_len: usize,
+    /// Pre-reserved chunk buffers handed to this pass at construction
+    /// (see `with_spares`) - consumed as `current` fills. Empty for
+    /// `new()`, which simply allocates a fresh chunk on every rollover
+    /// instead; fine off the realtime thread (tests, the session-script
+    /// runner, offline rendering).
+    spares: Vec<Vec<i16>>,
+    /// Set once this pass had to allocate a chunk itself because
+    /// `spares` ran dry - see the module doc comment.
+    pub allocated_on_thread: bool,
+    /// The last (up to) `XFADE_SAMPLES` displaced samples, in order,
+    /// independent of chunk boundaries - so the punch-out fade in
+    /// `finish` never needs to reach back into an already-closed chunk.
+    tail: VecDeque<i16>,
     dither: Dither,
     scratch: Vec<i16>,
 }
@@ -65,69 +112,112 @@ impl RecordPass {
         Self {
             track,
             start,
-            displaced: Vec::new(),
+            chunks: Vec::new(),
+            current: Vec::new(),
+            total_len: 0,
+            spares: Vec::new(),
+            allocated_on_thread: false,
+            tail: VecDeque::with_capacity(XFADE_SAMPLES),
             dither: Dither::new(seed),
             scratch: Vec::new(),
         }
     }
 
-    /// Pre-size the pass buffers so `write_block` never allocates
-    /// (REQ-902). `capacity` is the most samples the pass can write, i.e.
-    /// tape length minus the start position; `max_block` the largest block
-    /// the caller will hand over.
-    pub fn with_capacity(
+    /// Same as `new`, but starts with a reserve of pre-allocated chunk
+    /// buffers (from `Journal::take_spares`) instead of allocating its
+    /// first chunk fresh - see the module doc comment. `max_block` still
+    /// sizes the small per-block `scratch` working buffer, same as
+    /// before this change.
+    pub fn with_spares(
         track: usize,
         start: usize,
         seed: u32,
-        capacity: usize,
         max_block: usize,
+        spares: Vec<Vec<i16>>,
     ) -> Self {
         let mut p = Self::new(track, start, seed);
-        p.displaced.reserve_exact(capacity);
+        p.spares = spares;
         p.scratch.reserve_exact(max_block.max(XFADE_SAMPLES));
         p
     }
 
     /// Samples written so far.
     pub fn len(&self) -> usize {
-        self.displaced.len()
+        self.total_len
     }
 
     pub fn is_empty(&self) -> bool {
-        self.displaced.is_empty()
+        self.total_len == 0
     }
 
     /// Write one block of already-processed audio to tape, capturing what
     /// it displaces and applying the punch-in fade over the first
     /// `XFADE_SAMPLES` of the pass. Returns samples written.
     pub fn write_block(&mut self, tape: &mut Tape, block: &[f32]) -> usize {
-        let pos = self.start + self.len();
+        let pos = self.start + self.total_len;
         let room = tape.len_samples().saturating_sub(pos);
         let n = block.len().min(room);
         if n == 0 {
             return 0;
         }
 
-        let old_len = self.displaced.len();
-        self.displaced.resize(old_len + n, 0);
-        tape.read_raw(self.track, pos, &mut self.displaced[old_len..]);
+        let mut done = 0usize;
+        while done < n {
+            // Roll to a fresh chunk when the current one is full (or
+            // this is the very first write, where `current` starts
+            // empty with zero capacity - the same check covers both).
+            if self.current.len() == self.current.capacity() {
+                if !self.current.is_empty() {
+                    let filled = std::mem::take(&mut self.current);
+                    self.chunks.push(filled);
+                }
+                match self.spares.pop() {
+                    Some(buf) => self.current = buf,
+                    None => {
+                        self.allocated_on_thread = true;
+                        self.current = Vec::with_capacity(CHUNK_SAMPLES);
+                    }
+                }
+            }
 
-        self.scratch.clear();
-        self.scratch.reserve(n);
-        for (i, &s) in block[..n].iter().enumerate() {
-            let idx = old_len + i;
-            let new = self.dither.quantize(s);
-            let value = if idx < XFADE_SAMPLES {
-                let t = (idx + 1) as f32 / XFADE_SAMPLES as f32;
-                let old = f32::from(self.displaced[idx]);
-                (f32::from(new) * t + old * (1.0 - t)).round() as i16
-            } else {
-                new
-            };
-            self.scratch.push(value);
+            let space = self.current.capacity() - self.current.len();
+            // `take` never exceeds the caller's block size (bounded by
+            // MAX_BLOCK, far smaller than CHUNK_SAMPLES), so the
+            // `scratch.reserve` below is always a no-op.
+            let take = (n - done).min(space);
+
+            let old_start = self.current.len();
+            self.current.resize(old_start + take, 0);
+            let abs_pos = pos + done;
+            tape.read_raw(
+                self.track,
+                abs_pos,
+                &mut self.current[old_start..old_start + take],
+            );
+
+            self.scratch.clear();
+            self.scratch.reserve(take);
+            for i in 0..take {
+                let pass_idx = self.total_len + done + i;
+                let old_sample = self.current[old_start + i];
+                let new = self.dither.quantize(block[done + i]);
+                let value = if pass_idx < XFADE_SAMPLES {
+                    let t = (pass_idx + 1) as f32 / XFADE_SAMPLES as f32;
+                    (f32::from(new) * t + f32::from(old_sample) * (1.0 - t)).round() as i16
+                } else {
+                    new
+                };
+                self.scratch.push(value);
+                if self.tail.len() == XFADE_SAMPLES {
+                    self.tail.pop_front();
+                }
+                self.tail.push_back(old_sample);
+            }
+            tape.write_raw(self.track, abs_pos, &self.scratch);
+            done += take;
         }
-        tape.write_raw(self.track, pos, &self.scratch);
-        n
+        self.total_len += done;
+        done
     }
 
     /// Close the pass, applying the punch-out fade to the tail of the
@@ -135,7 +225,7 @@ impl RecordPass {
     /// Skipped when the pass ran to the very end of the tape, where there
     /// is nothing to blend back into.
     pub fn finish(&mut self, tape: &mut Tape) {
-        let len = self.len();
+        let len = self.total_len;
         if len == 0 {
             return;
         }
@@ -147,22 +237,42 @@ impl RecordPass {
         let tail_start = end - fade;
         self.scratch.resize(fade, 0);
         tape.read_raw(self.track, tail_start, &mut self.scratch[..fade]);
+        // `self.tail` always holds at least the last `fade` displaced
+        // samples (fade <= XFADE_SAMPLES, tail's own cap), regardless of
+        // which chunk they originally landed in.
+        let tail_len = self.tail.len();
         for i in 0..fade {
             let t = (i + 1) as f32 / fade as f32;
             let new = f32::from(self.scratch[i]);
-            let old = f32::from(self.displaced[len - fade + i]);
+            let old = f32::from(self.tail[tail_len - fade + i]);
             self.scratch[i] = (new * (1.0 - t) + old * t).round() as i16;
         }
-        let tail: Vec<i16> = self.scratch[..fade].to_vec();
-        tape.write_raw(self.track, tail_start, &tail);
+        tape.write_raw(self.track, tail_start, &self.scratch[..fade]);
+    }
+
+    /// Consume the pass, returning its displaced-audio chunks in order
+    /// (closed ones followed by whatever `current` holds, full or not) -
+    /// what `Journal::push_pass` persists. Concatenation happens only as
+    /// each chunk's bytes are written to disk (`Journal::write_payload`,
+    /// always off the realtime thread), never in memory here.
+    pub fn into_chunks(mut self) -> Vec<Vec<i16>> {
+        self.chunks.push(self.current);
+        self.chunks
     }
 
     /// Restore the displaced audio, returning what was on tape in its
-    /// place so the operation can be redone.
+    /// place so the operation can be redone. Not on any realtime path
+    /// (only `Journal::undo`/`redo`, always off-thread, do this for
+    /// real) - used directly only by this module's own test below.
     pub fn undo(&self, tape: &mut Tape) -> Vec<i16> {
-        let mut current = vec![0i16; self.displaced.len()];
+        let mut current = vec![0i16; self.total_len];
         tape.read_raw(self.track, self.start, &mut current);
-        tape.write_raw(self.track, self.start, &self.displaced);
+        let mut offset = 0;
+        for chunk in &self.chunks {
+            tape.write_raw(self.track, self.start + offset, chunk);
+            offset += chunk.len();
+        }
+        tape.write_raw(self.track, self.start + offset, &self.current);
         current
     }
 }
@@ -205,7 +315,7 @@ mod tests {
         let new = sine(3000.0, -6.0, 5000);
         let mut pass1 = RecordPass::new(0, 2000, 2);
         assert_eq!(pass1.write_block(&mut tape, &new), 5000);
-        assert_eq!(pass1.displaced.len(), 5000);
+        assert_eq!(pass1.len(), 5000);
         pass1.finish(&mut tape);
 
         // Mid-region (clear of both crossfades) is the new signal.
@@ -289,5 +399,48 @@ mod tests {
             tape.read_raw(i + 1, 0, &mut now);
             assert_eq!(&now, buf, "track {} changed", i + 1);
         }
+    }
+
+    #[test]
+    fn a_pass_spanning_several_chunks_round_trips_through_undo() {
+        // Longer than one CHUNK_SAMPLES worth, so this exercises the
+        // chunk-rollover path in write_block, using no spares (the
+        // plain `new()` path always falls back to fresh chunks).
+        let len = CHUNK_SAMPLES * 2 + 777;
+        let mut tape = Tape::new(len + 1000);
+        let signal = sine(440.0, -6.0, len);
+        let mut p = RecordPass::new(0, 500, 5);
+        assert_eq!(p.write_block(&mut tape, &signal), len);
+        assert!(p.allocated_on_thread, "new() has no spares, must fall back");
+        p.finish(&mut tape);
+
+        let mut before = vec![0i16; len];
+        tape.read_raw(0, 500, &mut before);
+        let after_write = before.clone();
+
+        let restored = p.undo(&mut tape);
+        assert_eq!(
+            restored, after_write,
+            "redo payload matches what was on tape"
+        );
+        let mut now = vec![0i16; len];
+        tape.read_raw(0, 500, &mut now);
+        assert_eq!(now, vec![0i16; len], "undo restores the original silence");
+    }
+
+    #[test]
+    fn spares_avoid_the_fallback_allocation_within_their_budget() {
+        let len = CHUNK_SAMPLES + 100;
+        let mut tape = Tape::new(len + 100);
+        let spares = vec![
+            Vec::with_capacity(CHUNK_SAMPLES),
+            Vec::with_capacity(CHUNK_SAMPLES),
+        ];
+        let mut p = RecordPass::with_spares(0, 0, 1, 4096, spares);
+        p.write_block(&mut tape, &sine(440.0, -6.0, len));
+        assert!(
+            !p.allocated_on_thread,
+            "two spares cover a pass just over one chunk boundary"
+        );
     }
 }
