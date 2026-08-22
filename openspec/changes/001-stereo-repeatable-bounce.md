@@ -2,9 +2,9 @@
 
 ## Motivation
 
-Requested directly by the owner while using the app, then reshaped five
+Requested directly by the owner while using the app, then reshaped six
 times after review found real design holes (see "History" at the end -
-this is now v6). The underlying problems are unchanged:
+this is now v7). The underlying problems are unchanged:
 
 1. **Stereo information is lost.** Today's bounce is a mono sum of
    tracks 1-3 onto track 4; anything panned comes out center.
@@ -27,8 +27,8 @@ a real step away from "the constraint IS the product" (spec section 1):
 on real hardware, every bounce costs you two tracks, permanently - that
 scarcity is part of what a 4-track forces you to commit to. This design
 trades that economics away in exchange for stereo imaging and repeatable
-layering, at a real, non-trivial memory cost (REQ-904 below roughly
-doubles, ~700MB to ~1428MB steady-state, ~2.5GB worst-case peak while
+layering, at a real, non-trivial memory cost (REQ-904 below more than
+doubles, ~700MB to ~1774MB steady-state, ~2.3GB worst-case peak while
 undoing a bounce). That trade is the owner's to make, and it's being
 asked for directly here, not slipped in as a footnote. It is not "no
 cost, all upside," and this document stops framing it that way.
@@ -197,7 +197,7 @@ always). If monitoring played `P` directly during the pass, a -6dB buss
 fader would sound 6dB louder *while bouncing* than the instant you let
 go of Record - a real, audible jump, the opposite of transparent.
 
-The actual fix needs no bypass and no new mechanism at all: **the buss's
+The actual fix needs no bypass and almost no new mechanism: **the buss's
 `playback` slot holds the pass's post-chain printed signal in place of
 its prior tape content, and flows through `Mixer::mix_block` exactly
 the way it always does** - through the buss's own smoothed fader/mute,
@@ -205,12 +205,34 @@ same code path as ordinary playback. This is precisely how monitoring
 an armed *track* mid-recording already works (`engine.rs`'s
 `self.playback[t] = self.processed[t]` during a pass, REQ-305) - REQ-408
 extends the identical, already-proven mechanism to the buss instead of
-inventing a parallel one. No discontinuity at punch-out, because the
-buss fader is applied consistently before, during, and after the pass.
+inventing a parallel one. **The buss's own contribution** stays
+continuous across punch-out, because its gain is applied consistently
+before, during, and after the pass - that's the specific, narrow claim
+this fix makes, not "nothing about the output changes at punch-out."
 
 Tracks 1-4's own contribution to the mix still needs to go silent
 during a bounce (unchanged from v5) - otherwise you'd hear them once
-directly and again inside the buss's printed copy.
+directly and again inside the buss's printed copy. **This means the
+*overall* output does jump at punch-out** - by exactly tracks 1-4's own
+contribution, which reappears the instant they un-silence. That's not a
+bug to hide (a sixth review pointed out the previous wording implied no
+jump at all, anywhere, which isn't true): it's the same thing real
+hardware does when you stop feeding a bus and start monitoring the
+result instead - you mute the sources after a bounce, same idea. State
+it, don't paper over it: **the buss's own audible contribution is
+continuous through punch-out; tracks 1-4 re-appearing is not.**
+
+**Tick-once, not twice, per sample (a sixth review caught this)**: the
+buss's smoothed gain is needed at two points for one sample - once
+folded into the pre-chain print input (REQ-406), once again for the
+post-chain monitor output above, and the chain runs *between* those two
+uses within the same sample's processing. `Smoothed`'s ramp advances
+one step per `tick()` call; calling it twice per sample would double
+the ramp's effective rate and make the result depend on how many times
+it happened to be read, which also breaks REQ-203's block-size
+invariance. The implementation MUST tick the buss's smoothed gain once
+per sample position and reuse that one value for both uses, not
+`tick()` it fresh at each use site.
 
 **Metering is not silenced (a second, separate clause of REQ-408):**
 tracks 1-4's own individual meters MUST keep reflecting their live
@@ -277,14 +299,23 @@ before recording over it - not a special case to design around.
 - **REQ-407 (new)**: a bounce pass's own prior content at a given tape
   position MUST be read before the pass's new value is written to that
   position (block-local read-before-write; no lookahead).
-- **REQ-408 (new)**: while a bounce pass is open, tracks 1-4's own
-  contribution to the audible output MUST be silent; the audible output
-  MUST be the pass's post-chain printed signal, output directly (not
-  re-scaled by the buss's own fader/mute a second time). Track-level
-  metering MUST NOT be silenced by this - it keeps reflecting each
-  track's live signal. Resolves the double-sum a naive REQ-305 reading
-  produces for a self-inclusive pass, and the dead-meters gap a fourth
-  review caught in v4's version - see "Monitoring" above.
+- **REQ-408 (new), corrected - a sixth review found this bullet still
+  had v5's inverted rule even after the narrative section was fixed**:
+  while a bounce pass is open, tracks 1-4's own contribution to the
+  audible output MUST be silent; the buss's contribution MUST be the
+  pass's post-chain printed signal flowing through the buss's own
+  smoothed fader/mute, the same `Mixer::mix_block` path ordinary
+  playback always uses (**not** output directly/bypassing that path -
+  v5's rule, which produces a punch-out discontinuity, per "Monitoring"
+  below). The buss's smoothed gain value MUST be computed once per
+  sample and reused for both its contribution to the print input
+  (REQ-406) and its contribution to the monitor output at that same
+  sample position - never advanced twice for one sample (see
+  "Monitoring" below for why that matters). Track-level metering MUST
+  NOT be silenced by this - it keeps reflecting each track's live
+  signal. Resolves the double-sum a naive REQ-305 reading produces for
+  a self-inclusive pass, and the dead-meters gap a fifth review caught
+  in v5's version - see "Monitoring" below.
 - **REQ-409 (new)**: the bounce buss MUST have its own volume fader and
   mute (REQ-406/408 both depend on "the buss's own fader/mute" already
   existing), independent of tracks 1-4's (REQ-601) - no pan, since it's
@@ -406,6 +437,15 @@ restore logic follows.
   passes 0 for its left channel and 1 for right, giving correlated
   wow/flutter (one modulation instance shared between channels, per
   "Bouncing" above) but decorrelated hiss between L and R, as intended.
+  **Dither gets the same channel term, decided here rather than left
+  unstated (a sixth review pointed out `RecordPass`'s dither is seeded
+  independently of the character chain and this document has been
+  bitten by dither-seeding assumptions before)**: a stereo pass uses two
+  `Dither` instances, `seed_for(noise_seed, pass_id, channel)` for each,
+  same derivation as hiss. TPDF dither is ~-90dBFS noise either way, so
+  this is inaudible - decided for determinism's sake (REQ-702's
+  bit-reproducibility guarantee), not because correlated dither would be
+  a real problem.
 - **REQ-801/802 (buss storage)**: the buss's audio lives in its own two
   raw i16 files (`tape/bounce_l.raw`, `tape/bounce_r.raw`), written in
   the same 5-second dirty-chunk pattern as tracks 1-4
@@ -429,6 +469,22 @@ restore logic follows.
   `Entry::bytes()` (which `evict()` sums against `max_bytes`) needs a
   `right_track.is_some()` branch that doubles accordingly, or eviction
   silently undercounts every bounce entry by half.
+
+  **On-disk layout, pinned (a sixth review found this undefined too)**:
+  one file per entry `id`, same as today (`path_for(id)`) - not two
+  files, and not interleaved samples. The left channel's chunks are
+  written first, then the right channel's, back to back; `len` (already
+  pinned as per-channel) tells `read_payload`'s caller exactly where the
+  split falls when reading it back for a stereo entry. This keeps
+  `path_for`/the file-per-id model unchanged; only the caller needs to
+  know an entry is stereo and read/split accordingly. `Journal`'s
+  per-track give-back arrays (`chunk_pool: [Vec<Vec<i16>>; NUM_TRACKS]`
+  for tracks, the double-buffered reserve for the buss - see "Realtime-
+  safe allocation") are two genuinely separate mechanisms, not one
+  indexed by a "virtual track number" that could exceed `NUM_TRACKS` and
+  panic - `push_pass`/`flush_pending` need an explicit branch on whether
+  a closed pass is a track pass or a buss pass, routing to the matching
+  give-back path, rather than one array both share.
 
 ### Session-script support (REQ-804)
 
@@ -489,16 +545,13 @@ here. Four new ops, matching the shape of what's already there:
   pre-allocated chunks (`Journal.chunk_pool: [Vec<Vec<i16>>; NUM_TRACKS]`,
   `CHUNK_POOL_PER_TRACK` each), handed to a new pass and returned by a
   closed one entirely via `mem::take`/plain moves - no partial-take
-  container to build, no allocation at either end. Extending this to the
-  buss's two channels means growing that array by two more dedicated
-  slots (own constant, not folded into `NUM_TRACKS`) - the same
-  mechanism, not a new one, +2 x `CHUNK_POOL_PER_TRACK` x
-  `tape::CHUNK_SAMPLES` x 2 bytes = ~23MB. `RecordPass::finish`'s
+  container to build, no allocation at either end. `RecordPass::finish`'s
   `.to_vec()` allocation and `push_pass`'s `format!`/`PathBuf` filename
   computation (a second and third realtime-thread allocation the same
   review caught) are also already fixed in the same commits -
   `Entry.file` doesn't exist anymore; the filename is always derived
-  from `id`.
+  from `id`. This mechanism (many small chunks, per-track) is a good fit
+  for tracks; it is **not** extended to the buss - see below.
   - **The buss does NOT extend this mechanism - a fifth review found
     that plan doesn't work, and it's right**: `CHUNK_POOL_PER_TRACK` (24
     chunks, ~2 minutes) is sized for an ordinary take. A bounce is not
@@ -507,22 +560,37 @@ here. Four new ops, matching the shape of what's already there:
     channel with nothing flushing in between; a 15-minute one needs 180.
     Extending the *same* small reserve to the buss means the "rare
     fallback" path v5 described is actually the *common* case for this
-    specific operation - which defeats the point. **Resolution: the buss
-    gets its own, different mechanism - one dedicated reserve per
-    channel, sized to the cassette's full length**, not a small
-    per-take share. This is allocated once, off the realtime thread, at
+    specific operation - which defeats the point. v6's first attempt at
+    a fix (one dedicated full-tape-length buffer per channel) traded
+    this for a different, structurally identical bug, caught by a sixth
+    review: a bounce pass either uses the *whole* reserve or doesn't -
+    there's no partial-use remainder to give back immediately the way a
+    track pass gives back its unused chunks, so the entire buffer moves
+    into `pending_writes` on close and doesn't return until the next
+    flush (`Save`/`Undo`/`Redo` - `Stop` deliberately does not flush,
+    see `stop_does_not_write_the_journal_payload_until_save`). Bounce
+    twice in a row with nothing saved in between - not an edge case,
+    it's problem #2 in this proposal's own Motivation - and the second
+    bounce allocates a full-tape buffer on the realtime thread.
+
+    **Resolution: double-buffer the reserve - two full-tape-length
+    buffers per channel, not one.** Standard practice for exactly this
+    shape of problem (a producer needs a fresh buffer while the
+    previous one is still draining downstream). Bounce 1 takes buffer
+    A; bounce 2, started before anything has flushed, takes buffer B -
+    available immediately, independent of A's state, no allocation.
+    By the time a third bounce might want a buffer with nothing saved
+    in between across *all three*, that's a genuinely rare pattern this
+    proposal accepts falling back for, same as any track pass exceeding
+    its own reserve - rare, documented, counted, not silently wrong.
+    Both buffers are allocated once, off the realtime thread, at
     cassette open/create - the same moment ordinary `Tape` storage
-    itself is allocated - and handed to a bounce pass wholesale via the
-    same `mem::take` pattern already proven for tracks (a `[Vec<i16>;
-    2]`-shaped reserve, or the two-channel equivalent, not a
-    `Vec<Vec<i16>>` pool of small chunks at all - a bounce pass doesn't
-    need to roll between chunks; it gets one buffer, sized for anything
-    up to the whole tape, and that's the end of the allocation question
-    for that pass). It's given back the same way tracks give back
-    theirs: immediately on close (whatever the pass didn't use) plus
-    whatever's left after the next flush. This is a real, larger memory
-    commitment - see REQ-904 below, recomputed to include it honestly -
-    not a cost this proposal gets to understate again.
+    itself is allocated - and handed out/reclaimed via the same
+    `mem::take` pattern already proven for tracks, just as a pair
+    instead of a pool. This roughly doubles the buss reserve's own
+    memory cost (see REQ-904 below, recomputed to include it honestly)
+    - a real, larger commitment, stated plainly rather than understated
+    a second time.
   - **Known, separate, pre-existing risk not addressed here**: the
     journal's `push_pass`/`evict` also run on the realtime thread today
     (reachable from `Stop`, which isn't blocking either) and grow plain
@@ -543,13 +611,21 @@ here. Four new ops, matching the shape of what's already there:
     whether this proposal proceeds.
 - **`Mixer::mix_block`**: needs a pre-master-fader intermediate sum
   exposed (today `target()` bakes `master_db` into every track's
-  per-sample gain before summing). The cleanest shape: compute the
-  existing per-track sum without the master factor, expose it, then
-  apply master gain as one scalar pass over `out_l`/`out_r` for the
-  audible/export path - mathematically identical for ordinary playback,
-  but floating-point multiply isn't strictly associative, so this
-  reordering can perturb the existing golden render at the bit level.
-  That's on top of the already-known golden-regen need from removing
+  per-sample gain before summing). **Not** a bare scalar multiply over
+  `out_l`/`out_r` for the audible/export path, as an earlier version of
+  this document said - a sixth review pointed out that would drop
+  master-fader moves out of the smoothed ramp `target()` currently
+  folds them into, so a master move would click, a real REQ-602
+  regression nothing in the existing test suite would catch
+  (`fader_jump_does_not_click` only exercises track faders). The master
+  factor needs its own `Smoothed` instance, ticked once per sample and
+  applied as the final multiply - same click-free guarantee as today,
+  just computed as a separate step instead of folded into each track's
+  own ramp. Mathematically identical to today's output for ordinary
+  playback once the smoothing is preserved; floating-point multiply
+  isn't strictly associative, so this reordering can still perturb the
+  existing golden render at the bit level. That's on top of the
+  already-known golden-regen need from removing
   `{"op":"bounce"}` (`tests/golden.rs`, `tests/cli.rs:208`) - one
   regeneration event, one TASKS.md note, one notification, covering
   both causes. `Mixer` also needs a per-track "excluded from the sum,
@@ -571,27 +647,43 @@ here. Four new ops, matching the shape of what's already there:
   Saturation, Hiss, Bandwidth, Flutter, Crush - flutter is last, not "in
   the middle" as an earlier version of this document said; wherever
   `build_chain` actually puts it is where `StereoFlutter` goes too.)
-- **Latency accumulation across fold-forward bounces - open, not
-  resolved here**: `Flutter`'s delay line has a fixed ~480-sample (10ms)
-  centre tap, reported via `latency_samples()` but not currently
-  compensated anywhere in the engine. Each bounce shifts everything
-  already printed a further ~10ms relative to tracks 1-4, compounding
-  with every generation - a direct consequence of "a second bounce folds
-  the first one forward." Two real options exist (accept the drift, real
-  tape doesn't perfectly time-align either; or compensate using the
-  already-present but unused `latency_samples()` when reading the buss's
-  prior content) and this document doesn't pick one - flagged honestly
-  as unresolved rather than papered over, since it also affects the
-  stereo-image and REQ-403 tests' validity across several generations.
-- **REQ-905 / M6 CPU headroom - open, not resolved here**: today's
-  bounce is an offline batch operation with no realtime deadline. This
-  design makes it a realtime operation running two full character
-  chains (independent per-channel saturation/hiss/bandwidth/crush plus
-  one shared `StereoFlutter`) inside the same audio callback as tracks'
-  own chains, on a Pi 4 at a 128-256 frame period. Nothing in this
-  proposal measures or bounds that cost - it needs real on-device
-  profiling at implementation time, the same way M6.2's performance pass
-  already covers tracks. Not a paper decision.
+- **Latency accumulation across fold-forward bounces - decided, not left
+  open (a sixth review correctly said this needs a real decision, not
+  just an honest flag)**: `Flutter`'s ~480-sample (10ms) centre-tap delay
+  is not new to this proposal - it's inherent to the character chain
+  every ordinary record pass already goes through, uncompensated, today
+  (`latency_samples()` exists but nothing calls it). Every track's
+  recorded content is already ~10ms shifted from "true" input timing on
+  its very first pass; this proposal doesn't introduce that, it just
+  means a bounce compounds it across generations the same way
+  overdubbing an already-flutter-affected track would. **Decision:
+  accept the drift**, consistent with how the engine already treats
+  every other pass - real cassette tape doesn't perfectly time-align
+  across generations either (wow/flutter is itself a genuine timing
+  smear on real hardware, not just a numerical artifact of this one).
+  The alternative - compensating via `latency_samples()` when reading
+  the buss's prior content - would mean reading at `position - 480`,
+  which contradicts REQ-407's "block-local read-then-write... not a
+  lookahead" as written; rejected specifically to avoid reopening REQ-407
+  for a discrepancy real hardware shares anyway. This does mean the
+  stereo-image and REQ-403 tests should tolerate a few hundred samples
+  of drift across generations rather than asserting exact alignment -
+  noted so the tests are written correctly the first time.
+- **REQ-905 / M6 CPU headroom - genuinely needs on-device measurement,
+  not resolvable on paper, but given a concrete task and a stated
+  fallback rather than left as a bare flag**: today's bounce is an
+  offline batch operation with no realtime deadline. This design makes
+  it realtime, running two full character chains (independent
+  per-channel saturation/hiss/bandwidth/crush plus one shared
+  `StereoFlutter`) inside the same audio callback as tracks' own chains,
+  on a Pi 4 at a 128-256 frame period. Task: measure actual callback
+  headroom with a bounce running alongside armed tracks, as part of
+  M6.2's existing performance pass (`TASKS.md`), before this ships, not
+  after. Stated fallback if it doesn't fit: raise the frame period for
+  the duration of a bounce specifically (REQ-905 already treats
+  128-256 as a target, not a hard floor), rather than degrade the DSP
+  chain's quality - not a decision this document needs to finalize, but
+  a real fallback exists and isn't "redesign everything."
 - **New arm-like flag** for the bounce buss (REQ-404), plus the mutual-
   exclusion wiring with tracks 1-4's `armed` array (REQ-405).
 - **`process_block`**: the buss becomes a fifth mix contributor (fader +
@@ -616,15 +708,22 @@ here. Four new ops, matching the shape of what's already there:
   for the existing monotonic HF-loss/noise-floor-rise assertion.
   Scriptable via `Op::BounceArm{on:true}`, `Op::Bounce{...}`,
   `Op::Mute{track,on:true}`x4, `Op::Bounce{...}`x3.
-- **New test**: stereo image survives a bounce and a second bounce (a
-  hard-panned source stays audibly on its side, no collapse toward
-  center).
+- **New test, named metric added (a sixth review pointed out neither of
+  these two had one)**: stereo image survives a bounce and a second
+  bounce - hard-pan a source fully left, bounce, bounce again; assert
+  the printed right channel's band energy in the source's frequency
+  range stays at least 10dB below the left channel's (via
+  `porta_testkit::spectral::band_energy_db`, already used elsewhere in
+  this codebase for exactly this kind of assertion) - a real floor, not
+  "still sounds panned."
 - **New test**: `StereoFlutter`'s two channels' delay excursions
   correlate (driven by one `FlutterModulator`), verifiable directly by
   feeding it identical input on both channels and asserting the outputs
   match - simpler and more precise than inferring it from a full bounce
-  render. A second test confirms hiss stays decorrelated between the
-  two channels of an actual bounce pass (REQ-702).
+  render. A second test, named metric added: hiss stays decorrelated
+  between the two channels of an actual bounce pass - assert the
+  Pearson correlation coefficient between the two channels' hiss-only
+  regions stays below 0.1 over a multi-second window (REQ-702).
 - **New test**: `Flutter`'s own behavior (tracks 1-4's chain) is
   unchanged by its internal split into `FlutterModulator` +
   `FlutterDelay` - same existing tests (its own module's, generation-
@@ -667,26 +766,33 @@ here. Four new ops, matching the shape of what's already there:
   document - guessing one (v5's "under 50%") without having actually run
   the pass is asserting a number nobody has measured; pin a regression
   bound from the real figure once this is implemented, not before.
-- **New test**: while a bounce pass is open, the audible output matches
-  the printed signal scaled by the buss's *current* fader/mute
-  consistently - set a non-unity buss fader (`Op::BounceFader`) and
-  assert the same scaling applies during the pass and immediately after
-  it closes, no jump at punch-out (REQ-408's core claim, corrected from
-  v5's inverted rule). A second assertion: each track's own meter still
-  reflects its live signal during the pass rather than reading silent
-  (REQ-408's metering clause).
+- **New test, scope corrected (a sixth review pointed out the whole-
+  output version can't pass - see "Monitoring" above)**: with tracks
+  1-4 silent (e.g. muted via `Op::Mute`, isolating the buss's own
+  contribution from the expected tracks-1-4 jump), assert a non-unity
+  buss fader (`Op::BounceFader`) scales the audible output the same way
+  during a bounce pass and immediately after it closes - no jump in the
+  *buss's own* contribution at punch-out (REQ-408's actual, narrower
+  claim). A second assertion: each track's own meter still reflects its
+  live signal during the pass rather than reading silent (REQ-408's
+  metering clause).
 - **New test**: one Undo press after a bounce restores both channels
   atomically - no reachable state with one channel reverted and the
   other not (REQ-502/505).
-- **New test**: a pass onto the buss's two channels, run back-to-back
-  with ordinary track passes, doesn't exhaust the chunk pool budget in
-  ordinary use - covered by extending the existing pool-budget math
-  (see "Realtime-safe allocation" above), not a new mechanism to test in
-  isolation.
-- **REQ-904 (resident memory ceiling), itemized carefully this time -
-  this number has been wrong twice already, both times from leaving out
-  a real mechanism, so this version lists every contributor explicitly
-  and rounds conservatively rather than claiming false precision**:
+- **New test, corrected (the previous version tested a mechanism this
+  proposal no longer uses)**: two bounces run back-to-back with nothing
+  saved in between never fall back to a realtime-thread allocation
+  (`pass_buffer_fallbacks()` stays 0) - the case the double-buffered
+  reserve exists to cover. A second test: a *third* bounce in the same
+  circumstance is allowed to fall back (documented, accepted behavior,
+  not a bug) - asserts the honest boundary of the guarantee rather than
+  claiming an unlimited one.
+- **REQ-904 (resident memory ceiling), itemized carefully - this number
+  has been wrong three times already (v3, v4, v5), each time from
+  leaving out a real mechanism; the arithmetic method below is the one
+  the sixth review independently verified, re-run here against
+  the same code, and rounds conservatively rather than claiming false
+  precision**:
 
   *Steady-state* (cassette open, nothing mid-flush):
   - Tape storage: 4 tracks x 172.8MB + 1 stereo buss x 172.8MB/channel
@@ -695,31 +801,33 @@ here. Four new ops, matching the shape of what's already there:
     4 x `CHUNK_POOL_PER_TRACK`(24) x `CHUNK_SAMPLES`(240,000) x 2 bytes
     = **~46MB**
   - Buss dedicated reserve (this proposal's new mechanism, see
-    "Realtime-safe allocation" above - full-tape-sized, not chunked):
-    2 channels x 172.8MB = **345.6MB**
-  - Steady-state total: **~1428MB**
+    "Realtime-safe allocation" above - **two** full-tape-sized buffers
+    per channel, double-buffered so a second bounce with nothing saved
+    in between doesn't allocate): 2 buffers x 2 channels x 172.8MB =
+    **691.2MB**
+  - Steady-state total: **~1774MB**
 
   *Additional worst-case transient*, during an Undo of a full-length
-  stereo bounce entry (a fifth review's finding: `Journal::undo`'s
-  `current` read, `read_payload`'s disk-read buffer, and
-  `write_payload`'s byte-encoding buffer are all separate, temporary
-  allocations, each sized to the whole entry, all live briefly at once):
-  roughly 3x a full stereo entry's size, 3 x 345.6MB = **~1037MB**,
-  on top of the steady-state figure above, only while that specific
-  operation runs.
+  stereo bounce entry (`Journal::undo`'s `current` read, `read_payload`'s
+  disk-read buffer, and `write_payload`'s byte-encoding buffer are all
+  separate, temporary allocations sized to the entry): processed
+  sequentially per channel (the simpler, and off the realtime thread so
+  there's no reason not to), roughly 3x one channel's size at a time,
+  3 x 172.8MB = **~518MB**, on top of the steady-state figure above,
+  only while that specific operation runs.
 
-  **Worst-case peak: ~1428MB + ~1037MB ≈ ~2.5GB.** That's deliberately
-  a generous, additive estimate, not a tight bound - the only claim that
+  **Worst-case peak: ~1774MB + ~518MB ≈ ~2.3GB.** Deliberately a
+  generous, additive estimate, not a tight bound - the only claim that
   needs to hold is "fits comfortably in the real device's headroom,"
   which it does by a wide margin regardless of exactly how conservative
   this arithmetic is: checked against the actual deployment Pi
   (`patch@192.168.68.55`, confirmed via `free -h`: 8GB total, ~5.8GB
   free at idle with the desktop session and audio stack already
-  running) - ~2.5GB peak against ~5.8GB free leaves over 3GB of margin
-  even in the worst case. The ceiling is revised from ~700MB to ~2.5GB
-  peak (~1428MB steady-state; default 15-minute cassette roughly half
-  each figure) rather than shortening max cassette length or the buss,
-  because on the real target hardware there is no actual memory
+  running) - ~2.3GB peak against ~5.8GB free leaves well over 3GB of
+  margin even in the worst case. The ceiling is revised from ~700MB to
+  ~2.3GB peak (~1774MB steady-state; default 15-minute cassette roughly
+  half each figure) rather than shortening max cassette length or the
+  buss, because on the real target hardware there is no actual memory
   pressure to trade against. If this project ever targets a
   smaller-RAM Pi 4 variant, this whole section needs recomputing against
   that device's real headroom, not assumed to still hold - noted here
@@ -883,29 +991,51 @@ accumulation across generations, REQ-905/M6 CPU headroom for two
 character chains in the realtime callback, a script op to actually set
 the buss's fader for REQ-408's own test to be writable).
 
-**v6 (this revision)**: REQ-408 rewritten with the corrected direction -
-the buss's `playback` slot carries the printed signal through the exact
-same monitoring mechanism tracks already use (REQ-305), not a bypass;
-no discontinuity, no new special case. The buss gets its own dedicated,
-full-tape-sized reserve, not an extension of the small per-track chunk
-pool - a genuinely different mechanism for a genuinely different access
-pattern, acknowledged as a real, larger memory commitment. REQ-904 is
-recomputed a third time with every contributor itemized explicitly
-(tape storage, the shipped track pool, the new buss reserve, and the
-undo-transient cost) and rounded conservatively rather than claiming
-false precision - ~1428MB steady-state, ~2.5GB worst-case peak, still
-comfortable against the real Pi's ~5.8GB free. The peak-level test
-finally asserts something a healthy signal couldn't produce by
-accident. REQ-409 gets its REQ-602 carve-out and smoothing statement;
-two more script ops (`Op::BounceFader`/`Op::BounceMute`) make REQ-408's
-own test and the muted-buss behavior actually writable. `Entry.len`'s
-per-channel meaning is pinned, `Journal::undo`/`redo`'s real
-second-channel path is named, and the print-tap-point section states
-explicitly where it sits relative to the hardware safety clamp added
-earlier this session. Impact on tasks gains the `Chain`-splitting
-builder, the metering flag as a real new mechanism rather than a free
-extension, REQ-306's buss analogue, and two items left honestly
-unresolved rather than papered over: latency accumulation across
-fold-forward bounces, and REQ-905/M6's realtime CPU cost, both flagged
-as needing a real decision or real measurement this document doesn't
-have. Ready for a sixth spec-reviewer pass.
+**v6**: REQ-408 rewritten with the corrected direction, the buss's
+dedicated full-tape reserve introduced, REQ-904 recomputed a third
+time, REQ-409/406/407/703 and the on-disk-format questions addressed,
+and two items (latency accumulation, REQ-905 CPU cost) left explicitly
+open rather than papered over. A sixth review verified the shipped-code
+claims this time were accurate (a first, after five rounds), and the
+REQ-904 arithmetic was right *for the model it stated* - but found two
+real defects in what v6 itself introduced: the corrected REQ-408
+*narrative* never made it into the REQ-408 *normative bullet*, which
+still had v5's inverted rule - the exact text that would get copied
+into `spec.md`; and the new buss reserve, being one monolithic buffer
+per channel, has no partial-use remainder to give back immediately the
+way a track's chunked reserve does, so it reproduces the original
+chunk-pool bug in a new shape - a second bounce with nothing saved in
+between (not an edge case; it's the feature's own motivation #2)
+allocates on the realtime thread again. Also found: REQ-408's own test
+as specified can't pass (there's a real, correct jump in the *overall*
+output at punch-out when tracks un-silence - the claim needed narrowing
+to the buss's own contribution); "apply master gain as one scalar pass"
+silently drops master moves out of their smoothed ramp, a real REQ-602
+regression nothing in the test suite would catch; the buss's smoothed
+gain is needed twice per sample (print input, monitor output) and
+`Smoothed::tick()` can't be called twice without breaking REQ-203; the
+stereo journal payload's on-disk layout and give-back routing were
+unspecified; dither seeding for a stereo pass was unstated; and two
+tests had no named numeric assertion.
+
+**v7 (this revision)**: REQ-408's normative bullet now matches its
+corrected narrative. The buss reserve is double-buffered - two
+full-tape buffers per channel, not one - so a second bounce with
+nothing flushed in between takes the second buffer instead of
+allocating; a third in the same circumstance is the documented,
+accepted fallback boundary. REQ-904 recomputed a fourth time with the
+doubled reserve: ~1774MB steady-state, ~2.3GB worst-case peak, still
+comfortable against the real Pi's headroom. REQ-408's test is scoped to
+the buss's own contribution (tracks muted) rather than the whole
+output, which genuinely does jump when tracks un-silence - stated
+explicitly instead of asserted away. The master-gain refactor gets its
+own smoothed instance instead of a bare scalar multiply; the buss's
+smoothed gain is ticked once per sample and reused for both uses. The
+stereo payload's on-disk layout (one file, left-then-right) and the
+track-vs-buss give-back routing are pinned. Dither seeding extends the
+same channel-term derivation already used for hiss. The stereo-image
+and hiss-decorrelation tests get real numeric thresholds. Latency
+accumulation is decided (accept the drift, consistent with how every
+other pass already behaves) rather than left open; REQ-905's CPU-cost
+item gets a concrete task and a stated fallback. Ready for a seventh
+spec-reviewer pass.
