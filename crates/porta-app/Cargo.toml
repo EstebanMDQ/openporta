@@ -26,6 +26,11 @@ thiserror = { workspace = true }
 cpal = { version = "0.18", optional = true, features = ["pipewire"] }
 rtrb = { version = "0.3", optional = true }
 slint = { version = "1.17", optional = true }
+# Free-space indicator in the Tapes view. fs2's actively-maintained
+# successor - no libc dependency on Linux (uses rustix), same
+# available_space() call on macOS and Linux. UI-only: nothing else
+# needs disk-space info.
+fs4 = { version = "0.13", optional = true }
 
 [build-dependencies]
 slint-build = "1.17"
@@ -36,7 +41,7 @@ porta-testkit = { workspace = true }
 [features]
 default = []
 realtime = ["dep:cpal", "dep:rtrb"]
-ui = ["dep:slint"]
+ui = ["dep:slint", "dep:fs4"]
 
 [lints]
 workspace = true

@@ -616,14 +616,33 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
         let silence = vec![0.0f32; TICK_SAMPLES];
         let mut mix_l = vec![0.0f32; TICK_SAMPLES];
         let mut mix_r = vec![0.0f32; TICK_SAMPLES];
+        // Autosave: REQ-802 permits saving on the Stop transition,
+        // alongside an explicit Save press. Tracks whether a Record
+        // pass happened since the last save, and if so, saves the
+        // instant the transport lands back on Stopped - never while
+        // still recording, and never when nothing changed.
+        let mut recorded_since_save = false;
         timer.start(slint::TimerMode::Repeated, TICK, move || {
             let mut slot = backend.borrow_mut();
             let b = slot.as_mut().expect("backend always present between ticks");
             b.tick_silent(&silence, &mut mix_l, &mut mix_r);
             #[cfg(feature = "realtime")]
             b.poll_live();
+            let snap = b.snapshot();
+            if snap.transport_state == TransportState::Recording {
+                recorded_since_save = true;
+            } else if snap.transport_state == TransportState::Stopped && recorded_since_save {
+                recorded_since_save = false;
+                if let Some(ui) = ui_weak.upgrade() {
+                    let path = ui.get_cassette_path().to_string();
+                    let status = with_engine(&mut slot, &path, |engine| {
+                        status_message("autosave", engine.save())
+                    });
+                    ui.set_status_text(status.into());
+                }
+            }
             if let Some(ui) = ui_weak.upgrade() {
-                refresh(&ui, &b.snapshot());
+                refresh(&ui, &slot.as_ref().unwrap().snapshot());
             }
         });
     }
@@ -792,6 +811,87 @@ fn connect_cassette(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             refresh(&ui, &slot.as_ref().unwrap().snapshot());
         });
     }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_refresh_tapes_pressed(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh_tapes_view(&ui);
+            }
+        });
+    }
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_load_tape_pressed(move |name| {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let current = ui.get_cassette_path().to_string();
+            let parent = std::path::Path::new(&current)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            ui.set_cassette_path(
+                parent
+                    .join(name.as_str())
+                    .to_string_lossy()
+                    .into_owned()
+                    .into(),
+            );
+            // Reuses on_load_pressed's own with_engine/reconnect logic
+            // rather than duplicating it here.
+            ui.invoke_load_pressed();
+        });
+    }
+}
+
+/// Sibling cassettes in the same parent directory as `cassette_path`,
+/// for the Tapes view's picker - anything next to the currently open
+/// one that looks like a cassette (has a manifest.json), listed by
+/// directory name. Doesn't recurse.
+fn sibling_cassettes(cassette_path: &str) -> Vec<String> {
+    let path = std::path::Path::new(cassette_path);
+    let Some(parent) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && e.path().join("manifest.json").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Free space on the volume holding the tapes directory, formatted for
+/// the Tapes view ("12.3 GB free") - a rough gauge, not a precise
+/// accounting of what a given cassette actually needs (that varies
+/// with length and character), just enough to notice "running low"
+/// before it becomes a failed save.
+fn free_space_text(cassette_path: &str) -> String {
+    let path = std::path::Path::new(cassette_path);
+    let target = path.parent().unwrap_or(path);
+    match fs4::available_space(target) {
+        Ok(bytes) => format!("{:.1} GB free", bytes as f64 / 1_073_741_824.0),
+        Err(_) => String::new(),
+    }
+}
+
+/// Populates the Tapes view's cassette list and free-space text -
+/// called whenever that view opens, so a tape created or removed
+/// elsewhere (or just filled up) shows up without restarting the app.
+fn refresh_tapes_view(ui: &MainWindow) {
+    let path = ui.get_cassette_path().to_string();
+    let names = sibling_cassettes(&path);
+    ui.set_cassette_names(slint::ModelRc::new(slint::VecModel::from(
+        names
+            .into_iter()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>(),
+    )));
+    ui.set_free_space_text(free_space_text(&path).into());
 }
 
 /// Pre-fills the input/output/period/offset fields from whatever
@@ -1176,6 +1276,32 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn sibling_cassettes_lists_dirs_containing_a_manifest() {
+        let dir = TempDir::new("siblings");
+        std::fs::create_dir_all(dir.0.join("tape-a")).unwrap();
+        std::fs::write(dir.0.join("tape-a").join("manifest.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.0.join("tape-b")).unwrap();
+        std::fs::write(dir.0.join("tape-b").join("manifest.json"), "{}").unwrap();
+        std::fs::create_dir_all(dir.0.join("not-a-tape")).unwrap();
+
+        let names = sibling_cassettes(dir.0.join("tape-a").to_str().unwrap());
+        assert_eq!(names, vec!["tape-a".to_string(), "tape-b".to_string()]);
+    }
+
+    #[test]
+    fn sibling_cassettes_is_empty_for_a_root_path() {
+        assert_eq!(sibling_cassettes("/"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn free_space_text_reports_gigabytes_free() {
+        let dir = TempDir::new("freespace");
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let text = free_space_text(dir.0.join("tape").to_str().unwrap());
+        assert!(text.ends_with("GB free"), "got: {text}");
     }
 
     #[test]
