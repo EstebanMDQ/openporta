@@ -785,3 +785,53 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       a different (already-proven-correct-by-construction) boolean
       expression, not separately screenshotted. Full gate green across
       all four feature combinations.
+      Tapes view + autosave + free-space indicator + no-scroll mixer
+      screen, 2026-08-22, all four requested together
+      ("saving progress... a view to manage tapes... free space...
+      avoid the screen to scroll"):
+      - New Tapes view (a "Tapes" button next to the cassette path
+        opens it, same pattern as the Settings gear): lists sibling
+        cassette directories next to the one currently open (anything
+        with a manifest.json, via std::fs::read_dir - no new
+        dependency), tap a name to load it; New/Load and both Export
+        buttons moved here from the main mixer screen. Free-space text
+        (fs4::available_space on the tapes directory, new optional
+        dependency, ui-feature-gated only) shown at the top.
+      - Autosave: the timer tick tracks whether a Record pass happened
+        since the last save and saves automatically the instant the
+        transport lands back on Stopped - REQ-802 explicitly allows
+        this trigger. Never mid-recording, never redundantly. Pulled
+        the decision out into a standalone autosave_decision(flag,
+        state) function partway through (it started as inline timer-
+        closure logic, which isn't headlessly testable - the project's
+        own invariant) with 2 new tests covering fire-once-then-quiet
+        and the no-recording case.
+      - Moving New/Load/Export out wasn't enough by itself to fit the
+        800x480 kiosk display - first deploy still showed a scrollbar
+        with Save/Undo/status cut off below the fold. Second pass:
+        shortened the vertical fader/meter travel 140px -> 90px,
+        dropped the "pan" text label (the slider's own center position
+        already says it), merged the Save/Undo row with the status
+        line instead of stacking them, tightened padding/spacing.
+      - 3 new Rust-side tests (sibling-cassette scanning against a real
+        temp directory, free-space text format, root-path edge case).
+      Verified for real on the Pi, two full CI-build-and-deploy passes
+      (release.yml's workflow_dispatch leg, linux-aarch64 artifact):
+      first pass's screenshot showed the predicted scrollbar/cutoff;
+      second pass's screenshot (grim, real 800x480 kiosk output) shows
+      the whole mixer screen - path/Tapes/Settings, counter, position
+      bar, transport, all 4 tracks + master, Save/Undo/status - with no
+      scrollbar and visible margin to spare. That session had also
+      auto-connected to the L6 for real (status line: "connected: out
+      L6 Analog Surround 4.0 / in L6 Multichannel"), a rerun of M6.1's
+      auto-connect confirming it still works end to end. Did not verify
+      the Tapes view's own click-through (load a sibling, hit New/
+      Export) - no input-injection tool is installed on the Pi and
+      installing one wasn't asked for; its Rust-side logic (the risky,
+      novel part - filesystem scanning and free-space formatting) is
+      covered by the 3 tests above against a real filesystem, and its
+      .slint layout reuses the same ScrollView/TactileButton/list-row
+      patterns already screenshot-verified for the Settings view.
+      Worth a real click-through later if an input tool gets approved.
+      Full gate green across all four feature combinations, both
+      passes.
