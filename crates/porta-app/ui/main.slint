@@ -54,7 +54,11 @@ component TactileButton inherits Rectangle {
 component MeterBar inherits Rectangle {
     in property <float> level-fraction: 0;
     width: 20px;
-    height: 140px;
+    // Matches the fader Slider's own height below it - shortened from
+    // 140px so the mixer screen fits the 800x480 kiosk display without
+    // scrolling (still a real vertical throw, just not the maximum
+    // that alone would fit).
+    height: 90px;
     background: #222;
     border-radius: 3px;
 
@@ -90,8 +94,8 @@ component TrackStrip inherits Rectangle {
     border-color: Palette.border;
 
     VerticalLayout {
-        padding: 6px;
-        spacing: 4px;
+        padding: 4px;
+        spacing: 3px;
         alignment: start;
 
         Text {
@@ -130,7 +134,7 @@ component TrackStrip inherits Rectangle {
             MeterBar { level-fraction: meter-fraction; }
             Slider {
                 orientation: vertical;
-                height: 140px;
+                height: 90px;
                 // Unity (0dB) sits at 3/4 of the travel up from the
                 // bottom, not dead center or at the top: (0 - -36) /
                 // (12 - -36) = 0.75. Below unity is all cut, down to
@@ -142,12 +146,9 @@ component TrackStrip inherits Rectangle {
                 changed(v) => { fader-changed(v); }
             }
         }
-        Text {
-            text: "pan";
-            horizontal-alignment: center;
-            font-size: 9px;
-            color: gray;
-        }
+        // No "pan" label - screen space is tight enough on the kiosk
+        // display that the slider's own center-detent position (0 -
+        // straight up the middle) is left to speak for itself.
         Slider {
             minimum: -1;
             maximum: 1;
@@ -517,8 +518,8 @@ export component MainWindow inherits Window {
             height: 100%;
 
             VerticalLayout {
-                padding: 10px;
-                spacing: 8px;
+                padding: 6px;
+                spacing: 6px;
 
                 HorizontalLayout {
                     spacing: 8px;
@@ -637,7 +638,7 @@ export component MainWindow inherits Window {
                                 MeterBar { level-fraction: master-meter-r-fraction; }
                                 Slider {
                                     orientation: vertical;
-                                    height: 140px;
+                                    height: 90px;
                                     minimum: -36;
                                     maximum: 12;
                                     value: master-fader-db;
@@ -648,6 +649,9 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                // Save/Undo and the status line share one row (instead
+                // of stacking) - one less row's worth of height, part
+                // of fitting the kiosk display without scrolling.
                 HorizontalLayout {
                     spacing: 10px;
                     alignment: center;
@@ -657,12 +661,13 @@ export component MainWindow inherits Window {
                         enabled: can-undo;
                         clicked => { undo-pressed(); }
                     }
-                }
-                Text {
-                    text: status-text;
-                    horizontal-alignment: center;
-                    font-size: 10px;
-                    color: gray;
+                    Text {
+                        text: status-text;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        font-size: 10px;
+                        color: gray;
+                    }
                 }
             }
         }
