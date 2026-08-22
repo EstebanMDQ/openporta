@@ -82,6 +82,10 @@ pub struct Mixer {
     fader_db: [f32; NUM_TRACKS],
     pan: [f32; NUM_TRACKS],
     master_db: f32,
+    /// Silences a track's contribution independent of its fader value -
+    /// unlike pulling the fader down, muting doesn't disturb the gain
+    /// you'll get back when you unmute.
+    muted: [bool; NUM_TRACKS],
     left: [Smoothed; NUM_TRACKS],
     right: [Smoothed; NUM_TRACKS],
     /// Peak of each track's contribution (post-fader, pre-pan) in the
@@ -107,6 +111,7 @@ impl Mixer {
             fader_db: [0.0; NUM_TRACKS],
             pan: [0.0; NUM_TRACKS],
             master_db: 0.0,
+            muted: [false; NUM_TRACKS],
             left: [Smoothed::settled(l); NUM_TRACKS],
             right: [Smoothed::settled(r); NUM_TRACKS],
             track_peak: [0.0; NUM_TRACKS],
@@ -116,6 +121,14 @@ impl Mixer {
 
     pub fn set_fader_db(&mut self, track: usize, db: f32) {
         self.fader_db[track] = db;
+    }
+
+    pub fn set_muted(&mut self, track: usize, muted: bool) {
+        self.muted[track] = muted;
+    }
+
+    pub fn is_muted(&self, track: usize) -> bool {
+        self.muted[track]
     }
 
     pub fn set_pan(&mut self, track: usize, pan: f32) {
@@ -152,6 +165,12 @@ impl Mixer {
     }
 
     fn target(&self, track: usize) -> (f32, f32) {
+        if self.muted[track] {
+            // Folded into the same smoothed target as the fader, so
+            // mute/unmute rides the existing 5ms ramp instead of an
+            // instant cut - no separate click-avoidance path needed.
+            return (0.0, 0.0);
+        }
         let amp = db_to_amp(self.fader_db[track]) * db_to_amp(self.master_db);
         let (l, r) = pan_gains(self.pan[track]);
         (amp * l, amp * r)
@@ -177,15 +196,22 @@ impl Mixer {
             let (tl, tr) = self.target(t);
             self.left[t].set_target(tl);
             self.right[t].set_target(tr);
-            let fader_amp = db_to_amp(self.fader_db[t]);
+            // Fader only, not master: lets the meters show track
+            // balance independent of the overall volume knob. Muted
+            // reads as silent too - the meter should match what's
+            // actually contributing to the mix, not the fader value
+            // muting is deliberately not disturbing.
+            let fader_amp = if self.muted[t] {
+                0.0
+            } else {
+                db_to_amp(self.fader_db[t])
+            };
             let mut peak = 0.0f32;
             for (n, &s) in input.iter().enumerate() {
                 out_l[n] += s * self.left[t].tick();
                 out_r[n] += s * self.right[t].tick();
                 peak = peak.max(s.abs());
             }
-            // Fader only, not master: lets the meters show track
-            // balance independent of the overall volume knob.
             self.track_peak[t] = peak * fader_amp;
         }
         // Hard safety ceiling on the summed output, not just the
@@ -279,6 +305,36 @@ mod tests {
         assert_no_clicks!(&left);
         // And the jump actually happened.
         assert!(rms_dbfs(&left[..4800]) - rms_dbfs(&left[43_200..]) > 20.0);
+    }
+
+    #[test]
+    fn mute_silences_a_track_without_touching_its_fader() {
+        let mut m = Mixer::new();
+        m.set_fader_db(0, -6.0);
+        m.set_muted(0, true);
+        let s = sine(1000.0, 0.0, 4800);
+        mix_once(&mut m, 0, &s); // settle the ramp
+        let (l, r) = mix_once(&mut m, 0, &s);
+        assert!(
+            rms_dbfs(&l) < -80.0 && rms_dbfs(&r) < -80.0,
+            "muted track should be silent, got l={} r={}",
+            rms_dbfs(&l),
+            rms_dbfs(&r)
+        );
+        assert_eq!(
+            m.fader_db(0),
+            -6.0,
+            "mute must not disturb the fader value itself"
+        );
+        assert!(
+            m.track_level_db(0) < -80.0,
+            "meter should read silent while muted"
+        );
+
+        m.set_muted(0, false);
+        mix_once(&mut m, 0, &s); // settle the unmute ramp
+        let (l, _) = mix_once(&mut m, 0, &s);
+        assert_rms_near_db!(&l, -3.01 - 3.01 - 6.0, 0.1);
     }
 
     #[test]

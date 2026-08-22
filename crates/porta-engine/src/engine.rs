@@ -34,6 +34,10 @@ pub struct Engine {
     journal: Journal,
     project: Project,
     armed: [bool; NUM_TRACKS],
+    /// Whether an armed track's live input is audible while stopped or
+    /// playing, not just while actually recording - see
+    /// `Command::Monitor`.
+    monitor: [bool; NUM_TRACKS],
     passes: [Option<RecordPass>; NUM_TRACKS],
     chains: Vec<Chain>,
     pass_counter: u64,
@@ -82,6 +86,7 @@ impl Engine {
             journal,
             project,
             armed: [false; NUM_TRACKS],
+            monitor: [false; NUM_TRACKS],
             passes: [const { None }; NUM_TRACKS],
             // Replaced per pass in `record()`; a passthrough placeholder
             // keeps the array populated while stopped.
@@ -120,8 +125,20 @@ impl Engine {
         self.armed[track]
     }
 
+    pub fn set_monitor(&mut self, track: usize, on: bool) {
+        self.monitor[track] = on;
+    }
+
+    pub fn is_monitor(&self, track: usize) -> bool {
+        self.monitor[track]
+    }
+
     pub fn fader_db(&self, track: usize) -> f32 {
         self.mixer.fader_db(track)
+    }
+
+    pub fn is_muted(&self, track: usize) -> bool {
+        self.mixer.is_muted(track)
     }
 
     pub fn pan(&self, track: usize) -> f32 {
@@ -172,9 +189,18 @@ impl Engine {
         }
         const DEST: usize = NUM_TRACKS - 1;
         let sources: Vec<usize> = (0..DEST).collect();
+        // Muted tracks stay out of the bounce, same as they stay out of
+        // the live mix - "mute" means "don't include this," not just
+        // "don't monitor it."
         let gains: Vec<f32> = sources
             .iter()
-            .map(|&t| db_to_amp(self.mixer.fader_db(t)))
+            .map(|&t| {
+                if self.mixer.is_muted(t) {
+                    0.0
+                } else {
+                    db_to_amp(self.mixer.fader_db(t))
+                }
+            })
             .collect();
 
         let armed_before = self.armed;
@@ -289,6 +315,17 @@ impl Engine {
                 // Monitoring is post-chain (REQ-305): the player hears
                 // what the tape is receiving, not the old tape content.
                 self.playback[t][..n].copy_from_slice(&self.processed[t][..n]);
+            } else if self.armed[t] && self.monitor[t] {
+                // Input-monitor preview: hear what's coming in on an
+                // armed track without actually recording it, to check
+                // levels or mic placement before committing. Dry, not
+                // run through the character chain - that's reseeded
+                // fresh per record pass (REQ-303/REQ-304), and reusing
+                // it here for a stateless preview would mutate state a
+                // real pass doesn't expect to have been touched.
+                let src = &inputs[t][..n.min(inputs[t].len())];
+                self.playback[t][..src.len()].copy_from_slice(src);
+                self.playback[t][src.len()..n].fill(0.0);
             } else {
                 let (dst, _) = self.playback[t].split_at_mut(n);
                 self.tape.read(t, pos, dst);
@@ -445,6 +482,42 @@ mod tests {
         let (ml, mr) = e.master_level_db();
         assert!((ml - (-3.01)).abs() < 0.5, "master L got {ml} dB");
         assert!((mr - (-3.01)).abs() < 0.5, "master R got {mr} dB");
+    }
+
+    #[test]
+    fn monitor_previews_live_input_while_armed_and_not_recording() {
+        let dir = TempDir::new("monitor");
+        let mut e = Engine::create_with_character(&dir.0, 96_000, TapeCharacter::clean()).unwrap();
+        e.set_armed(0, true);
+        e.play();
+        let take = sine(1000.0, 0.0, 4800);
+
+        // Armed but not recording, monitor off: plays the (blank) tape,
+        // same as before this feature existed.
+        run(&mut e, 0, &take, 512);
+        assert!(
+            e.track_level_db(0) < -100.0,
+            "monitor off should stay silent, got {} dB",
+            e.track_level_db(0)
+        );
+
+        // Monitor on: hears the live input without recording it.
+        e.set_monitor(0, true);
+        run(&mut e, 0, &take, 512);
+        assert!(
+            (e.track_level_db(0) - 0.0).abs() < 0.5,
+            "monitor on should pass the live input through, got {} dB",
+            e.track_level_db(0)
+        );
+
+        // A preview, not a take - nothing should have reached tape.
+        e.stop();
+        let mut on_tape = vec![0i16; 4800];
+        e.tape().read_raw(0, 0, &mut on_tape);
+        assert!(
+            on_tape.iter().all(|&s| s == 0),
+            "monitor preview must not write to tape"
+        );
     }
 
     #[test]

@@ -38,6 +38,13 @@ pub struct Manifest {
     pub fader_db: [f32; NUM_TRACKS],
     pub pan: [f32; NUM_TRACKS],
     pub master_db: f32,
+    /// A mix decision, persisted like fader/pan - unlike arm and
+    /// monitor, which are session-transient "ready to record"/"preview"
+    /// states and were never saved either. `#[serde(default)]` so an
+    /// existing cassette's manifest.json (saved before this field
+    /// existed) still loads, unmuted.
+    #[serde(default)]
+    pub muted: [bool; NUM_TRACKS],
 }
 
 impl Manifest {
@@ -54,6 +61,7 @@ impl Manifest {
             fader_db: [0.0; NUM_TRACKS],
             pan: [0.0; NUM_TRACKS],
             master_db: 0.0,
+            muted: [false; NUM_TRACKS],
         }
     }
 
@@ -61,6 +69,7 @@ impl Manifest {
         for t in 0..NUM_TRACKS {
             mixer.set_fader_db(t, self.fader_db[t]);
             mixer.set_pan(t, self.pan[t]);
+            mixer.set_muted(t, self.muted[t]);
         }
         mixer.set_master_db(self.master_db);
     }
@@ -69,6 +78,7 @@ impl Manifest {
         for t in 0..NUM_TRACKS {
             self.fader_db[t] = mixer.fader_db(t);
             self.pan[t] = mixer.pan(t);
+            self.muted[t] = mixer.is_muted(t);
         }
         self.master_db = mixer.master_db();
     }

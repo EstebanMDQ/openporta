@@ -16,13 +16,48 @@ pub enum Command {
     Play,
     Stop,
     Record,
-    Seek { sample: usize },
-    Rewind { samples: usize },
-    FastForward { samples: usize },
-    Arm { track: usize, on: bool },
-    Fader { track: usize, db: f32 },
-    Pan { track: usize, value: f32 },
-    Master { db: f32 },
+    Seek {
+        sample: usize,
+    },
+    Rewind {
+        samples: usize,
+    },
+    FastForward {
+        samples: usize,
+    },
+    Arm {
+        track: usize,
+        on: bool,
+    },
+    Fader {
+        track: usize,
+        db: f32,
+    },
+    Pan {
+        track: usize,
+        value: f32,
+    },
+    Master {
+        db: f32,
+    },
+    /// Silences a track's contribution to the mix (both audible output
+    /// and its meter) regardless of its fader - independent of arm and
+    /// of monitor, so muting doesn't stop a track from recording if
+    /// it's armed, only from being heard.
+    Mute {
+        track: usize,
+        on: bool,
+    },
+    /// Whether an armed track's live input is audible even when not
+    /// actively recording - lets you check levels/sound before
+    /// committing. Recording always monitors input regardless of this
+    /// (REQ-305); it only changes what an armed-but-not-recording track
+    /// plays: its live input when on, the tape's existing content when
+    /// off.
+    Monitor {
+        track: usize,
+        on: bool,
+    },
     Bounce,
     Undo,
     Redo,
@@ -86,6 +121,8 @@ pub fn apply(engine: &mut Engine, command: Command) -> Result<(), EngineError> {
         Command::Fader { track, db } => engine.mixer().set_fader_db(track, db),
         Command::Pan { track, value } => engine.mixer().set_pan(track, value),
         Command::Master { db } => engine.mixer().set_master_db(db),
+        Command::Mute { track, on } => engine.mixer().set_muted(track, on),
+        Command::Monitor { track, on } => engine.set_monitor(track, on),
         Command::Bounce => engine.bounce()?,
         Command::Undo => engine.undo()?,
         Command::Redo => engine.redo()?,
@@ -115,6 +152,8 @@ mod tests {
                 value: 0.0,
             },
             Command::Master { db: 0.0 },
+            Command::Mute { track: 0, on: true },
+            Command::Monitor { track: 0, on: true },
         ] {
             assert!(!c.is_blocking(), "{c:?} should be safe in the callback");
         }

@@ -131,6 +131,30 @@ fn bounce_respects_faders_and_ignores_pans() {
 }
 
 #[test]
+fn bounce_excludes_muted_tracks() {
+    let dir = TempDir::new("mute");
+    let mut e = Engine::create_with_character(&dir.0, TAPE, TapeCharacter::clean()).unwrap();
+    record_onto(&mut e, 0, &sine(1000.0, -12.0, 48_000));
+
+    e.bounce().unwrap();
+    let audible = read_track(&e, 3, 48_000)[8192..40_000].to_vec();
+    assert!(
+        rms_dbfs(&audible) > -80.0,
+        "unmuted track should show up in the bounce"
+    );
+
+    e.undo().unwrap();
+    e.mixer().set_muted(0, true);
+    e.bounce().unwrap();
+    let silent = read_track(&e, 3, 48_000)[8192..40_000].to_vec();
+    assert!(
+        rms_dbfs(&silent) < -80.0,
+        "a muted source track should be left out of the bounce, got {}",
+        rms_dbfs(&silent)
+    );
+}
+
+#[test]
 fn bounce_is_undoable() {
     let dir = TempDir::new("undo");
     let mut e = Engine::create(&dir.0, TAPE, 7).unwrap();
