@@ -620,7 +620,9 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
         // alongside an explicit Save press. Tracks whether a Record
         // pass happened since the last save, and if so, saves the
         // instant the transport lands back on Stopped - never while
-        // still recording, and never when nothing changed.
+        // still recording, and never when nothing changed. The
+        // decision itself is a plain function (see autosave_decision)
+        // so it's covered by cargo test without a live timer/backend.
         let mut recorded_since_save = false;
         timer.start(slint::TimerMode::Repeated, TICK, move || {
             let mut slot = backend.borrow_mut();
@@ -629,10 +631,10 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
             #[cfg(feature = "realtime")]
             b.poll_live();
             let snap = b.snapshot();
-            if snap.transport_state == TransportState::Recording {
-                recorded_since_save = true;
-            } else if snap.transport_state == TransportState::Stopped && recorded_since_save {
-                recorded_since_save = false;
+            let (next_flag, should_save) =
+                autosave_decision(recorded_since_save, snap.transport_state);
+            recorded_since_save = next_flag;
+            if should_save {
                 if let Some(ui) = ui_weak.upgrade() {
                     let path = ui.get_cassette_path().to_string();
                     let status = with_engine(&mut slot, &path, |engine| {
@@ -1139,6 +1141,19 @@ fn meter_fraction(db: f32) -> f32 {
     ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
 }
 
+/// Whether this tick should autosave, and what `recorded_since_save`
+/// becomes afterward. `Recording` always sets the flag; landing on
+/// `Stopped` with the flag set fires exactly one save and clears it;
+/// everything else passes the flag through unchanged. Pulled out of
+/// the timer closure so the decision itself is plain and testable.
+fn autosave_decision(recorded_since_save: bool, state: TransportState) -> (bool, bool) {
+    match state {
+        TransportState::Recording => (true, false),
+        TransportState::Stopped if recorded_since_save => (false, true),
+        _ => (recorded_since_save, false),
+    }
+}
+
 fn status_message(action: &str, result: Result<(), porta_engine::engine::EngineError>) -> String {
     match result {
         Ok(()) => format!("{action}: ok"),
@@ -1276,6 +1291,36 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn autosave_fires_once_on_the_stop_after_a_recording() {
+        let mut flag = false;
+        let (f, save) = autosave_decision(flag, TransportState::Recording);
+        assert!(f && !save, "recording sets the flag, doesn't save yet");
+        flag = f;
+
+        let (f, save) = autosave_decision(flag, TransportState::Stopped);
+        assert!(!f && save, "stopping after a recording saves once");
+        flag = f;
+
+        let (f, save) = autosave_decision(flag, TransportState::Stopped);
+        assert!(
+            !f && !save,
+            "stopping again with nothing new doesn't re-save"
+        );
+    }
+
+    #[test]
+    fn autosave_never_fires_without_a_recording() {
+        assert_eq!(
+            autosave_decision(false, TransportState::Playing),
+            (false, false)
+        );
+        assert_eq!(
+            autosave_decision(false, TransportState::Stopped),
+            (false, false)
+        );
     }
 
     #[test]
