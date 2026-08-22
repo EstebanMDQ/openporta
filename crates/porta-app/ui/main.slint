@@ -1,16 +1,49 @@
 // M5.1: transport + tape counter. M5.2: track strips (arm/fader/pan) +
 // master + meters. Undo/save/export UI arrives in M5.3.
 
-import { Button, Slider, LineEdit, ComboBox, ScrollView, Palette } from "std-widgets.slint";
+import { Slider, LineEdit, ComboBox, ScrollView, Palette } from "std-widgets.slint";
 
 // Every button here is meant to be pressed by a finger on a small
 // touchscreen (the Pi kiosk display), not just clicked with a mouse -
-// std-widgets' default Button is sized for the latter. min-height/
-// font-size are the only overrides; everything else (text, clicked,
-// enabled) still comes straight from Button.
-component TactileButton inherits Button {
+// std-widgets' default Button is sized and colored for the latter, and
+// doesn't expose enough (no font-size, no background) to restyle for
+// contrast or a meaningful "on" state, so this is a plain Rectangle +
+// TouchArea instead. `active`/`active-color` give arm/mute/monitor/
+// transport buttons a real, solid highlight color (red for armed/
+// muted/recording, blue for monitoring, green for playing) instead of
+// a generic theme accent.
+component TactileButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    in property <color> active-color: Palette.accent-background;
+    out property <bool> pressed: touch.pressed;
+    callback clicked();
+
     min-height: 46px;
     min-width: 46px;
+    border-radius: 6px;
+    border-width: active ? 0px : 1px;
+    border-color: Palette.border;
+    background: active
+        ? (touch.pressed ? active-color.darker(0.15) : active-color)
+        : (touch.pressed ? Palette.alternate-background : Palette.control-background);
+    opacity: enabled ? 1.0 : 0.5;
+
+    animate background { duration: 100ms; }
+
+    Text {
+        text: root.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: 14px;
+        color: active ? white : Palette.foreground;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
 }
 
 // A vertical meter bar: a fixed-height track with a bottom-anchored
@@ -38,17 +71,23 @@ component MeterBar inherits Rectangle {
 component TrackStrip inherits Rectangle {
     in property <string> track-label: "1";
     in property <bool> armed: false;
+    in property <bool> muted: false;
+    in property <bool> monitor: false;
     in property <float> fader-db: 0;
     in property <float> pan: 0;
     in property <float> meter-fraction: 0;
 
     callback arm-pressed();
+    callback mute-pressed();
+    callback monitor-pressed();
     callback fader-changed(float);
     callback pan-changed(float);
 
-    width: 104px;
+    width: 116px;
     background: Palette.alternate-background;
     border-radius: 6px;
+    border-width: 1px;
+    border-color: Palette.border;
 
     VerticalLayout {
         padding: 6px;
@@ -63,7 +102,24 @@ component TrackStrip inherits Rectangle {
         }
         TactileButton {
             text: armed ? "ARMED" : "arm";
+            active: armed;
+            active-color: #e05252;
             clicked => { arm-pressed(); }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            TactileButton {
+                text: muted ? "MUTED" : "mute";
+                active: muted;
+                active-color: #e05252;
+                clicked => { mute-pressed(); }
+            }
+            TactileButton {
+                text: monitor ? "MON" : "mon";
+                active: monitor;
+                active-color: #4a90d9;
+                clicked => { monitor-pressed(); }
+            }
         }
         // Meter and fader side by side, like a real channel strip -
         // the fader's own travel tells you the gain at a glance
@@ -110,8 +166,8 @@ export component MainWindow inherits Window {
     // preferred-height matches the Pi kiosk display's own 800x480
     // (confirmed on-device via wlr-randr); the ScrollView below covers
     // anything still too tall to fit, on that screen or a smaller one.
-    preferred-width: 620px;
-    preferred-height: 480px;
+    preferred-width: 660px;
+    preferred-height: 500px;
     min-width: 480px;
     min-height: 280px;
     // Driven by `--kiosk` on the CLI (default false, so a plain
@@ -149,6 +205,11 @@ export component MainWindow inherits Window {
 
     in property <string> transport-state: "Stopped";
     in property <string> counter-text: "00:00";
+    // Raw sample counts (not the human-readable counter-text) driving
+    // the position bar below the transport row - float, not int, so
+    // the fraction below doesn't truncate under integer division.
+    in property <float> playhead-samples: 0;
+    in property <float> tape-len-samples: 1;
     in property <float> master-fader-db: 0;
     in property <float> master-meter-l-fraction: 0;
     in property <float> master-meter-r-fraction: 0;
@@ -180,34 +241,50 @@ export component MainWindow inherits Window {
     // callbacks from the root - the strips themselves are instantiated
     // once, in place, in the layout below.
     in property <bool> track1-armed <=> track1.armed;
+    in property <bool> track1-muted <=> track1.muted;
+    in property <bool> track1-monitor <=> track1.monitor;
     in property <float> track1-fader-db <=> track1.fader-db;
     in property <float> track1-pan <=> track1.pan;
     in property <float> track1-meter-fraction <=> track1.meter-fraction;
     callback track1-arm-pressed <=> track1.arm-pressed;
+    callback track1-mute-pressed <=> track1.mute-pressed;
+    callback track1-monitor-pressed <=> track1.monitor-pressed;
     callback track1-fader-changed <=> track1.fader-changed;
     callback track1-pan-changed <=> track1.pan-changed;
 
     in property <bool> track2-armed <=> track2.armed;
+    in property <bool> track2-muted <=> track2.muted;
+    in property <bool> track2-monitor <=> track2.monitor;
     in property <float> track2-fader-db <=> track2.fader-db;
     in property <float> track2-pan <=> track2.pan;
     in property <float> track2-meter-fraction <=> track2.meter-fraction;
     callback track2-arm-pressed <=> track2.arm-pressed;
+    callback track2-mute-pressed <=> track2.mute-pressed;
+    callback track2-monitor-pressed <=> track2.monitor-pressed;
     callback track2-fader-changed <=> track2.fader-changed;
     callback track2-pan-changed <=> track2.pan-changed;
 
     in property <bool> track3-armed <=> track3.armed;
+    in property <bool> track3-muted <=> track3.muted;
+    in property <bool> track3-monitor <=> track3.monitor;
     in property <float> track3-fader-db <=> track3.fader-db;
     in property <float> track3-pan <=> track3.pan;
     in property <float> track3-meter-fraction <=> track3.meter-fraction;
     callback track3-arm-pressed <=> track3.arm-pressed;
+    callback track3-mute-pressed <=> track3.mute-pressed;
+    callback track3-monitor-pressed <=> track3.monitor-pressed;
     callback track3-fader-changed <=> track3.fader-changed;
     callback track3-pan-changed <=> track3.pan-changed;
 
     in property <bool> track4-armed <=> track4.armed;
+    in property <bool> track4-muted <=> track4.muted;
+    in property <bool> track4-monitor <=> track4.monitor;
     in property <float> track4-fader-db <=> track4.fader-db;
     in property <float> track4-pan <=> track4.pan;
     in property <float> track4-meter-fraction <=> track4.meter-fraction;
     callback track4-arm-pressed <=> track4.arm-pressed;
+    callback track4-mute-pressed <=> track4.mute-pressed;
+    callback track4-monitor-pressed <=> track4.monitor-pressed;
     callback track4-fader-changed <=> track4.fader-changed;
     callback track4-pan-changed <=> track4.pan-changed;
 
@@ -226,6 +303,25 @@ export component MainWindow inherits Window {
             }
         }
         init => { self.focus(); }
+
+        // Holding rewind/fast-forward repeats the same jump every
+        // 200ms instead of just once - a quick tap fires only via
+        // clicked below (well under 200ms), a hold keeps searching
+        // until released. If the transport is playing at the time,
+        // each 200ms window between jumps is real, audible playback -
+        // a genuine (if choppy) audible scrub, not a silent jump, with
+        // no new engine capability needed: it's just the existing
+        // rewind/fast-forward commands fired repeatedly.
+        Timer {
+            interval: 200ms;
+            running: rewind-btn.pressed;
+            triggered => { rewind-pressed(); }
+        }
+        Timer {
+            interval: 200ms;
+            running: ff-btn.pressed;
+            triggered => { fast-forward-pressed(); }
+        }
 
         ScrollView {
             visible: show-settings;
@@ -280,6 +376,8 @@ export component MainWindow inherits Window {
                     spacing: 10px;
                     TactileButton {
                         text: connected ? "Disconnect" : "Connect";
+                        active: connected;
+                        active-color: #4caf6d;
                         clicked => {
                             if (connected) {
                                 disconnect-pressed();
@@ -360,15 +458,40 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                     }
                 }
+                // How far into the tape the playhead currently is -
+                // requested directly, sits right under the counter.
+                Rectangle {
+                    height: 6px;
+                    border-radius: 3px;
+                    background: Palette.alternate-background;
+                    Rectangle {
+                        x: 0;
+                        width: parent.width
+                            * clamp(tape-len-samples > 0 ? playhead-samples / tape-len-samples : 0, 0, 1);
+                        height: parent.height;
+                        border-radius: 3px;
+                        background: Palette.accent-background;
+                    }
+                }
                 HorizontalLayout {
                     spacing: 6px;
                     alignment: center;
                     TactileButton { text: "|<"; clicked => { seek-start-pressed(); } }
-                    TactileButton { text: "<<"; clicked => { rewind-pressed(); } }
-                    TactileButton { text: "Play"; clicked => { play-pressed(); } }
+                    rewind-btn := TactileButton { text: "<<"; clicked => { rewind-pressed(); } }
+                    TactileButton {
+                        text: "Play";
+                        active: transport-state == "Playing";
+                        active-color: #4caf6d;
+                        clicked => { play-pressed(); }
+                    }
                     TactileButton { text: "Stop"; clicked => { stop-pressed(); } }
-                    TactileButton { text: "Record"; clicked => { record-pressed(); } }
-                    TactileButton { text: ">>"; clicked => { fast-forward-pressed(); } }
+                    TactileButton {
+                        text: "Record";
+                        active: transport-state == "Recording";
+                        active-color: #e05252;
+                        clicked => { record-pressed(); }
+                    }
+                    ff-btn := TactileButton { text: ">>"; clicked => { fast-forward-pressed(); } }
                     TactileButton { text: ">|"; clicked => { seek-end-pressed(); } }
                 }
 
@@ -382,9 +505,11 @@ export component MainWindow inherits Window {
                     track4 := TrackStrip { track-label: "4"; }
 
                     Rectangle {
-                        width: 104px;
+                        width: 116px;
                         background: Palette.alternate-background;
                         border-radius: 6px;
+                        border-width: 1px;
+                        border-color: Palette.border;
 
                         VerticalLayout {
                             padding: 6px;

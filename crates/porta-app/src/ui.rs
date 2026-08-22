@@ -87,6 +87,8 @@ struct LiveState {
     transport_state: TransportState,
     playhead: usize,
     armed: [bool; NUM_TRACKS],
+    muted: [bool; NUM_TRACKS],
+    monitor: [bool; NUM_TRACKS],
     fader_db: [f32; NUM_TRACKS],
     pan: [f32; NUM_TRACKS],
     master_db: f32,
@@ -106,6 +108,8 @@ impl LiveState {
             transport_state: snap.transport_state,
             playhead: snap.playhead,
             armed: snap.armed,
+            muted: snap.muted,
+            monitor: snap.monitor,
             fader_db: snap.fader_db,
             pan: snap.pan,
             master_db: snap.master_db,
@@ -122,6 +126,8 @@ struct Snapshot {
     transport_state: TransportState,
     playhead: usize,
     armed: [bool; NUM_TRACKS],
+    muted: [bool; NUM_TRACKS],
+    monitor: [bool; NUM_TRACKS],
     fader_db: [f32; NUM_TRACKS],
     pan: [f32; NUM_TRACKS],
     track_level_db: [f32; NUM_TRACKS],
@@ -145,6 +151,8 @@ impl Backend {
             Backend::Live(live) => {
                 match cmd {
                     Command::Arm { track, on } => live.armed[track] = on,
+                    Command::Mute { track, on } => live.muted[track] = on,
+                    Command::Monitor { track, on } => live.monitor[track] = on,
                     Command::Fader { track, db } => live.fader_db[track] = db,
                     Command::Pan { track, value } => live.pan[track] = value,
                     Command::Master { db } => live.master_db = db,
@@ -194,6 +202,8 @@ impl Backend {
                 transport_state: engine.state(),
                 playhead: engine.playhead(),
                 armed: std::array::from_fn(|t| engine.is_armed(t)),
+                muted: std::array::from_fn(|t| engine.is_muted(t)),
+                monitor: std::array::from_fn(|t| engine.is_monitor(t)),
                 fader_db: std::array::from_fn(|t| engine.fader_db(t)),
                 pan: std::array::from_fn(|t| engine.pan(t)),
                 track_level_db: std::array::from_fn(|t| engine.track_level_db(t)),
@@ -208,6 +218,8 @@ impl Backend {
                 transport_state: live.transport_state,
                 playhead: live.playhead,
                 armed: live.armed,
+                muted: live.muted,
+                monitor: live.monitor,
                 fader_db: live.fader_db,
                 pan: live.pan,
                 track_level_db: live.track_level_db,
@@ -393,7 +405,7 @@ fn non_empty(s: &str) -> Option<String> {
 /// the track index and which generated callback they hook - a macro
 /// keeps that in one place instead of four hand-copied closures.
 macro_rules! wire_track {
-    ($ui:expr, $backend:expr, $index:expr, $arm:ident, $fader:ident, $pan:ident) => {{
+    ($ui:expr, $backend:expr, $index:expr, $arm:ident, $mute:ident, $monitor:ident, $fader:ident, $pan:ident) => {{
         let backend = Rc::clone(&$backend);
         let ui_weak = $ui.as_weak();
         $ui.$arm(move || {
@@ -401,6 +413,28 @@ macro_rules! wire_track {
             let b = slot.as_mut().expect("backend always present between ticks");
             let on = !b.snapshot().armed[$index];
             b.send(Command::Arm { track: $index, on });
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh(&ui, &b.snapshot());
+            }
+        });
+        let backend = Rc::clone(&$backend);
+        let ui_weak = $ui.as_weak();
+        $ui.$mute(move || {
+            let mut slot = backend.borrow_mut();
+            let b = slot.as_mut().expect("backend always present between ticks");
+            let on = !b.snapshot().muted[$index];
+            b.send(Command::Mute { track: $index, on });
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh(&ui, &b.snapshot());
+            }
+        });
+        let backend = Rc::clone(&$backend);
+        let ui_weak = $ui.as_weak();
+        $ui.$monitor(move || {
+            let mut slot = backend.borrow_mut();
+            let b = slot.as_mut().expect("backend always present between ticks");
+            let on = !b.snapshot().monitor[$index];
+            b.send(Command::Monitor { track: $index, on });
             if let Some(ui) = ui_weak.upgrade() {
                 refresh(&ui, &b.snapshot());
             }
@@ -432,11 +466,15 @@ macro_rules! wire_track {
 }
 
 pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
-    let backend: Rc<RefCell<Option<Backend>>> = Rc::new(RefCell::new(Some(Backend::Silent(
-        Box::new(Engine::open(dir).map_err(|e| e.to_string())?),
-    ))));
+    let engine = Engine::open(dir).map_err(|e| e.to_string())?;
+    let initial_tape_len = engine.manifest().len_samples;
+    let backend: Rc<RefCell<Option<Backend>>> =
+        Rc::new(RefCell::new(Some(Backend::Silent(Box::new(engine)))));
     let ui = MainWindow::new().map_err(|e| e.to_string())?;
     ui.set_kiosk_mode(kiosk);
+    // The position bar's denominator - only changes when a different
+    // cassette gets opened (New/Load below), not every tick.
+    ui.set_tape_len_samples(initial_tape_len as f32);
     refresh(&ui, &backend.borrow().as_ref().unwrap().snapshot());
     // Default export path resolves against the cassette, not whatever
     // directory the process happened to be launched from.
@@ -457,6 +495,8 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
         backend,
         0,
         on_track1_arm_pressed,
+        on_track1_mute_pressed,
+        on_track1_monitor_pressed,
         on_track1_fader_changed,
         on_track1_pan_changed
     );
@@ -465,6 +505,8 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
         backend,
         1,
         on_track2_arm_pressed,
+        on_track2_mute_pressed,
+        on_track2_monitor_pressed,
         on_track2_fader_changed,
         on_track2_pan_changed
     );
@@ -473,6 +515,8 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
         backend,
         2,
         on_track3_arm_pressed,
+        on_track3_mute_pressed,
+        on_track3_monitor_pressed,
         on_track3_fader_changed,
         on_track3_pan_changed
     );
@@ -481,6 +525,8 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
         backend,
         3,
         on_track4_arm_pressed,
+        on_track4_mute_pressed,
+        on_track4_monitor_pressed,
         on_track4_fader_changed,
         on_track4_pan_changed
     );
@@ -694,11 +740,13 @@ fn connect_cassette(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             let path = ui.get_cassette_path().to_string();
             let mut slot = backend.borrow_mut();
             let mut created = false;
+            let mut tape_len = None;
             let status = with_engine(&mut slot, &path, |engine| {
                 match create_default_cassette(&path) {
                     Ok(new_engine) => {
                         *engine = new_engine;
                         created = true;
+                        tape_len = Some(engine.manifest().len_samples);
                         format!("created {path}")
                     }
                     Err(e) => format!("new failed: {e}"),
@@ -706,6 +754,9 @@ fn connect_cassette(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             });
             if created {
                 ui.set_export_path(default_export_path(&path).into());
+            }
+            if let Some(len) = tape_len {
+                ui.set_tape_len_samples(len as f32);
             }
             ui.set_status_text(status.into());
             refresh(&ui, &slot.as_ref().unwrap().snapshot());
@@ -721,14 +772,19 @@ fn connect_cassette(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             let path = ui.get_cassette_path().to_string();
             let mut slot = backend.borrow_mut();
             let mut loaded = false;
+            let mut tape_len = None;
             let status = with_engine(&mut slot, &path, |engine| match Engine::open(&path) {
                 Ok(new_engine) => {
                     *engine = new_engine;
                     loaded = true;
+                    tape_len = Some(engine.manifest().len_samples);
                     format!("loaded {path}")
                 }
                 Err(e) => format!("load failed: {e}"),
             });
+            if let Some(len) = tape_len {
+                ui.set_tape_len_samples(len as f32);
+            }
             if loaded {
                 ui.set_export_path(default_export_path(&path).into());
             }
@@ -904,8 +960,10 @@ fn connect_audio(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
 /// Mirrors `wire_track!`: the four track strips refresh identically
 /// apart from index and which generated setter they call.
 macro_rules! refresh_track {
-    ($ui:expr, $snap:expr, $index:expr, $set_armed:ident, $set_fader:ident, $set_pan:ident, $set_meter:ident) => {
+    ($ui:expr, $snap:expr, $index:expr, $set_armed:ident, $set_muted:ident, $set_monitor:ident, $set_fader:ident, $set_pan:ident, $set_meter:ident) => {
         $ui.$set_armed($snap.armed[$index]);
+        $ui.$set_muted($snap.muted[$index]);
+        $ui.$set_monitor($snap.monitor[$index]);
         $ui.$set_fader($snap.fader_db[$index]);
         $ui.$set_pan($snap.pan[$index]);
         $ui.$set_meter(meter_fraction($snap.track_level_db[$index]));
@@ -915,12 +973,15 @@ macro_rules! refresh_track {
 fn refresh(ui: &MainWindow, snap: &Snapshot) {
     ui.set_transport_state(format!("{:?}", snap.transport_state).into());
     ui.set_counter_text(format_counter(snap.playhead).into());
+    ui.set_playhead_samples(snap.playhead as f32);
 
     refresh_track!(
         ui,
         snap,
         0,
         set_track1_armed,
+        set_track1_muted,
+        set_track1_monitor,
         set_track1_fader_db,
         set_track1_pan,
         set_track1_meter_fraction
@@ -930,6 +991,8 @@ fn refresh(ui: &MainWindow, snap: &Snapshot) {
         snap,
         1,
         set_track2_armed,
+        set_track2_muted,
+        set_track2_monitor,
         set_track2_fader_db,
         set_track2_pan,
         set_track2_meter_fraction
@@ -939,6 +1002,8 @@ fn refresh(ui: &MainWindow, snap: &Snapshot) {
         snap,
         2,
         set_track3_armed,
+        set_track3_muted,
+        set_track3_monitor,
         set_track3_fader_db,
         set_track3_pan,
         set_track3_meter_fraction
@@ -948,6 +1013,8 @@ fn refresh(ui: &MainWindow, snap: &Snapshot) {
         snap,
         3,
         set_track4_armed,
+        set_track4_muted,
+        set_track4_monitor,
         set_track4_fader_db,
         set_track4_pan,
         set_track4_meter_fraction
