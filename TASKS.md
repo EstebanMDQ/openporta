@@ -733,3 +733,55 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       grab would be anyway); the kiosk-toggle button itself is UI-only
       logic identical in shape to the already-verified Escape handler,
       not separately screenshotted.
+      Mute/monitor + real button colors + tape position bar + hold-to-
+      scrub, 2026-08-22, all requested directly and landed together:
+      - Engine: Command::Mute/Monitor, both non-blocking. Mute silences
+        a track's contribution to the mix (output and meter) without
+        touching its fader, folded into the same smoothed pan/fader
+        target so it rides the existing 5ms click-avoidance ramp;
+        persisted in the manifest like fader/pan (#[serde(default)] so
+        an existing cassette's manifest.json still loads); bounce()
+        fixed to exclude muted sources too - it summed tracks through
+        its own gain calculation, bypassing the mixer entirely, so
+        needed a separate fix. Monitor makes an armed track's live
+        input audible while stopped or playing, not just recording -
+        dry, not run through the character chain (that's reseeded
+        fresh per record pass, reusing it for a stateless preview
+        would mutate state a real pass doesn't expect); session-
+        transient like arm, not persisted. 3 new tests. Golden render
+        unaffected - both default off.
+      - UI: TactileButton rebuilt as a plain Rectangle + TouchArea
+        instead of inheriting std-widgets' Button, which never exposed
+        enough to restyle (font-size wasn't even overridable, found
+        earlier this session) - gives it a real `active`/`active-color`
+        for a solid, meaningful highlight (red for armed/muted, blue
+        for monitoring, green for Play while actually playing, red for
+        Record while actually recording) instead of a generic theme
+        accent. Track/master panels and every button also gained a
+        visible border for definition - the general "more contrast"
+        ask, not just the specific buttons named.
+      - Tape position bar under the counter, driven by two new raw-
+        sample float properties (playhead-samples/tape-len-samples -
+        float so the fraction doesn't truncate under integer
+        division); tape length set once at cassette-open time (launch/
+        New/Load), not every tick.
+      - Hold-to-scrub: holding rewind/fast-forward repeats the jump
+        every 200ms via a native Slint `Timer` bound to the button's
+        own pressed state - no new engine capability needed. If the
+        transport happens to be playing while held, each 200ms window
+        between jumps is genuine audible playback: a real, if choppy,
+        audible scrub through the existing Rewind/FastForward
+        commands. A quick tap still fires once via clicked, well under
+        the 200ms window.
+      Verified for real on the Pi: deployed the built binary, and
+      since I can't click through a remote session, hand-edited a
+      throwaway test cassette's manifest.json (muted[0]=true, playhead
+      at 25% of tape length) to exercise the exact same persisted-mute
+      and playhead-fraction paths a real session would - screenshotted
+      the result: Track 1's mute button renders solid red ("MUTED"),
+      the position bar shows correctly at 25%, and every panel/button
+      border reads clearly against the light theme. Play/Record's
+      active-coloring uses the identical TactileButton mechanism with
+      a different (already-proven-correct-by-construction) boolean
+      expression, not separately screenshotted. Full gate green across
+      all four feature combinations.
