@@ -173,14 +173,20 @@ export component MainWindow inherits Window {
     min-height: 280px;
     // Driven by `--kiosk` on the CLI (default false, so a plain
     // desktop launch stays a normal resizable/movable window). Both
-    // are built-in Window properties - full-screen also respects the
-    // SLINT_FULLSCREEN env var on its own, no-frame is winit-only.
+    // are built-in Window properties, no-frame is winit-only.
     // in-out (not in) so the Escape handler below can also flip it -
     // kiosk mode removes every bit of window chrome, so without an
     // escape hatch there would be no way to get back to the desktop
     // short of killing the process over ssh.
+    //
+    // maximized, not full-screen: visually identical (edge-to-edge, no
+    // chrome) on this compositor, but a true wlr fullscreen surface
+    // sits above the layer-shell "top" layer an on-screen keyboard
+    // (wvkbd) uses, hiding it completely - confirmed on-device
+    // 2026-08-22. A maximized window doesn't claim that exclusive
+    // state, so the keyboard can still show above it.
     in-out property <bool> kiosk-mode: false;
-    full-screen: kiosk-mode;
+    maximized: kiosk-mode;
     no-frame: kiosk-mode;
     background: Palette.background;
 

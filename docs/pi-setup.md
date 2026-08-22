@@ -79,6 +79,21 @@ useful when it can still see and reach the rest of the desktop, unlike
 the autostart entry above whose whole point is to take over the
 screen.
 
+## Desktop icon
+
+```bash
+cp deploy/openporta-desktop-icon.desktop ~/Desktop/openporta.desktop
+chmod +x ~/Desktop/openporta.desktop
+gio set ~/Desktop/openporta.desktop metadata::trusted true
+```
+
+Both the `chmod +x` and the `gio set` matter - PCManFM treats a
+`.desktop` file on the desktop as untrusted until both are true, and
+prompts "Execute / Execute in terminal / Open" on every double-click
+until it does. This was found and fixed 2026-08-22 after exactly that
+prompt showed up on real hardware; without either step the icon still
+*works*, it's just annoying every time.
+
 ## Getting out of kiosk mode
 
 `--kiosk` removes every bit of window chrome (no titlebar, no close

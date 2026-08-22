@@ -1,5 +1,8 @@
 [Desktop Entry]
-Type=Link
+Type=Application
 Name=openporta
+Comment=4-track cassette portastudio
 Icon=openporta
-URL=/home/patch/.local/share/applications/openporta.desktop
+Exec=sh -c 'exec "$HOME/openporta/bin/porta-app" ui "$HOME/openporta/tape1"'
+Terminal=false
+Categories=AudioVideo;Audio;
