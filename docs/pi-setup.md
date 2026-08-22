@@ -33,12 +33,18 @@ OS update and needs no `sudo`.
 ```bash
 mkdir -p ~/.config/autostart
 cp deploy/openporta-kiosk.desktop ~/.config/autostart/
+cp deploy/kiosk-launch.sh ~/openporta/bin/kiosk-launch.sh
+chmod +x ~/openporta/bin/kiosk-launch.sh
 ```
 
 Takes effect on the next login/reboot. The 3-second delay (both in the
 `Exec=` line itself and via `X-GNOME-Autostart-Delay`, in case the
 autostart runner doesn't honor the latter) gives the panel and
 PipeWire time to finish coming up first.
+
+The autostart entry runs `kiosk-launch.sh`, not `porta-app` directly -
+see "On-screen keyboard" below for why (it also suppresses the desktop
+panel, restoring it the moment openporta exits for any reason).
 
 [xdg-autostart]: https://specifications.freedesktop.org/autostart-spec/autostart-spec-latest.html
 
@@ -134,6 +140,21 @@ on-device, wvkbd rendered fine over the plain desktop but not over
 openporta's kiosk window before this. Visually identical either way
 (no-frame is still on, so it's still edge-to-edge with no window
 chrome) - only the underlying Wayland surface state differs.
+
+One consequence: unlike `full-screen`, `maximized` respects the desktop
+panel's reserved space instead of covering it, so the panel would
+otherwise reappear in kiosk mode - its own launchers, clock, and
+network icons, not exactly "locked down." `kiosk-launch.sh` (see
+Install above) and a matching Rust-side hook
+(`set_desktop_panel_suppressed`, `ui.rs`) suppress it for as long as
+kiosk mode is active and restore it the moment kiosk mode ends -
+whether that's the whole app exiting or just pressing Escape. Both do
+this by freezing (`SIGSTOP`/`SIGCONT`) the *existing* per-user
+`lwrespawn wf-panel-pi` supervisor rather than touching any system
+file - confirmed on-device: the panel disappears when kiosk mode
+starts, reappears cleanly (relaunched fresh by its own supervisor, no
+manual relaunch needed) the moment it ends, and the on-screen keyboard
+still renders correctly throughout.
 
 ## Getting out of kiosk mode
 

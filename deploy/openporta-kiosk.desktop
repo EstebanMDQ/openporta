@@ -2,5 +2,5 @@
 Type=Application
 Name=openporta
 Comment=Launch openporta in kiosk mode when the desktop session starts
-Exec=sh -c 'sleep 3 && exec "$HOME/openporta/bin/porta-app" ui "$HOME/openporta/tape1" --kiosk'
+Exec=sh -c 'sleep 3 && exec "$HOME/openporta/bin/kiosk-launch.sh"'
 X-GNOME-Autostart-Delay=3

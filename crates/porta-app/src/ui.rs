@@ -490,6 +490,7 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
     connect_transport(&ui, &backend);
     connect_cassette(&ui, &backend);
     connect_audio(&ui, &backend);
+    ui.on_kiosk_mode_changed(set_desktop_panel_suppressed);
     wire_track!(
         ui,
         backend,
@@ -1166,6 +1167,45 @@ fn status_message(action: &str, result: Result<(), porta_engine::engine::EngineE
 fn create_default_cassette(path: &str) -> Result<Engine, String> {
     let len = (porta_engine::SAMPLE_RATE as f32 * 60.0 * DEFAULT_MINUTES) as usize;
     Engine::create_with_character(path, len, TapeCharacter::new(0)).map_err(|e| e.to_string())
+}
+
+/// Best-effort, Pi/labwc-specific: freezes (rather than kills) the
+/// existing per-user `lwrespawn wf-panel-pi` supervisor and hides the
+/// panel, or lets it resume (relaunching the panel fresh) - kiosk mode
+/// switched from Slint's full-screen to maximized (see main.slint's
+/// module doc) so the on-screen keyboard can render above it, but
+/// maximized respects the panel's reserved space instead of covering
+/// it. `--kiosk`'s own initial suppression is handled by the launch
+/// wrapper (deploy/kiosk-launch.sh) before this window even opens; this
+/// only fires on a *live* toggle (Escape, the Settings button), so
+/// "get back to a usable desktop" actually shows the panel too. A
+/// silent no-op wherever wf-panel-pi doesn't exist - every error here
+/// is swallowed on purpose, never allowed to affect the UI.
+fn set_desktop_panel_suppressed(suppressed: bool) {
+    use std::process::Command;
+    let Ok(out) = Command::new("pgrep")
+        .args(["-f", "lwrespawn /usr/bin/wf-panel-pi"])
+        .output()
+    else {
+        return;
+    };
+    let Some(pid) = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()
+        .and_then(|l| l.trim().parse::<u32>().ok())
+    else {
+        return;
+    };
+    if suppressed {
+        let _ = Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status();
+        let _ = Command::new("pkill").args(["-x", "wf-panel-pi"]).status();
+    } else {
+        let _ = Command::new("kill")
+            .args(["-CONT", &pid.to_string()])
+            .status();
+    }
 }
 
 /// A sensible default export target: next to the cassette, not

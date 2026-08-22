@@ -188,6 +188,13 @@ export component MainWindow inherits Window {
     in-out property <bool> kiosk-mode: false;
     maximized: kiosk-mode;
     no-frame: kiosk-mode;
+    // Fired only by the two toggle points below (Escape, the Settings
+    // button) - not by the initial `--kiosk` startup value, which the
+    // launch wrapper (deploy/kiosk-launch.sh) already handles before
+    // this window even opens. Lets Rust best-effort suppress/restore
+    // the Pi's own desktop panel in sync with a *live* toggle, so
+    // Escape's "get back to a usable desktop" actually shows one.
+    callback kiosk-mode-changed(bool);
     background: Palette.background;
 
     callback play-pressed();
@@ -315,6 +322,7 @@ export component MainWindow inherits Window {
         key-pressed(event) => {
             if (event.text == Key.Escape && kiosk-mode) {
                 kiosk-mode = false;
+                kiosk-mode-changed(false);
                 accept
             } else {
                 reject
@@ -426,7 +434,10 @@ export component MainWindow inherits Window {
                 }
                 TactileButton {
                     text: kiosk-mode ? "Exit kiosk mode" : "Enter kiosk mode";
-                    clicked => { kiosk-mode = !kiosk-mode; }
+                    clicked => {
+                        kiosk-mode = !kiosk-mode;
+                        kiosk-mode-changed(kiosk-mode);
+                    }
                 }
             }
         }
