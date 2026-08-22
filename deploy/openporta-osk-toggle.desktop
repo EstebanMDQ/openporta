@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=On-screen keyboard
+Comment=Show/hide the on-screen keyboard (does nothing if a physical one is attached)
+Icon=input-keyboard
+Exec=sh -c '"$HOME/openporta/bin/toggle-osk.sh"'
+Terminal=false
+Categories=Utility;

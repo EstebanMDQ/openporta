@@ -94,6 +94,47 @@ until it does. This was found and fixed 2026-08-22 after exactly that
 prompt showed up on real hardware; without either step the icon still
 *works*, it's just annoying every time.
 
+## On-screen keyboard
+
+```bash
+sudo apt-get install -y wvkbd
+cp deploy/toggle-osk.sh ~/openporta/bin/toggle-osk.sh
+chmod +x ~/openporta/bin/toggle-osk.sh
+cp deploy/openporta-osk-toggle.desktop ~/.local/share/applications/openporta-osk-toggle.desktop
+chmod +x ~/.local/share/applications/openporta-osk-toggle.desktop
+gio set ~/.local/share/applications/openporta-osk-toggle.desktop metadata::trusted true
+```
+
+wvkbd, not `onboard`/`matchbox-keyboard` - those are X11 and this
+session is Wayland (labwc); wvkbd is a layer-shell keyboard built for
+exactly this kind of wlroots compositor. Add it to the taskbar the same
+way as the openporta launcher above, one more `launcher_NNNNNN=` line:
+
+```ini
+launcher_000005=openporta-osk-toggle.desktop
+```
+
+The launcher runs `deploy/toggle-osk.sh`, which toggles wvkbd on and
+off - except it's a silent no-op if a physical keyboard is already
+attached (checked via udev's `ID_INPUT_KEYBOARD` tag on every
+`/dev/input/event*` node, not guessed from a device list), so the
+button doesn't pop up a redundant on-screen keyboard when there's
+nothing to compensate for.
+
+Not done, and not attempted: getting wvkbd to show automatically when
+a text field gets focus in the Slint UI. That needs the app to speak
+Wayland's text-input protocol, which winit's (and therefore Slint's)
+support for is uncertain - the manual toggle button is the reliable
+path regardless of whether that would ever work.
+
+**Kiosk mode uses `maximized`, not Slint's `full-screen`, specifically
+so this works**: a true fullscreen surface sits above wlr-layer-shell's
+"top" layer (which wvkbd uses), hiding it completely - confirmed
+on-device, wvkbd rendered fine over the plain desktop but not over
+openporta's kiosk window before this. Visually identical either way
+(no-frame is still on, so it's still edge-to-edge with no window
+chrome) - only the underlying Wayland surface state differs.
+
 ## Getting out of kiosk mode
 
 `--kiosk` removes every bit of window chrome (no titlebar, no close
