@@ -57,6 +57,20 @@ pub struct Journal {
     /// run on the realtime audio thread.
     pending_writes: Vec<(u64, usize, Vec<Vec<i16>>)>,
     pending_deletes: Vec<u64>,
+    /// Chunk buffers `reclaim_chunks` couldn't return to a track's
+    /// reserve (wrong capacity, or the reserve's already at
+    /// `CHUNK_POOL_PER_TRACK` - reachable from a pass whose length
+    /// exceeded the reserve and fell back to an ordinary allocation for
+    /// the overflow, see `CHUNK_POOL_PER_TRACK`'s own doc comment).
+    /// `reclaim_chunks` can run on the realtime thread (via
+    /// `release_entry_payload`, reachable from `evict`/`push_pass`), so
+    /// it must never just drop these in place - that would deallocate
+    /// right there. Parking them here instead defers the actual
+    /// deallocation to `flush_pending`, which is never called from the
+    /// realtime thread (found in review: an earlier version of
+    /// `reclaim_chunks` dropped overflow chunks immediately, a real
+    /// REQ-902 gap this closes).
+    pending_frees: Vec<Vec<i16>>,
     /// One pre-reserved reserve of chunk buffers per track (see
     /// `CHUNK_POOL_PER_TRACK`) - `take_spares` hands a track's whole
     /// reserve over in one move (genuinely zero-allocation: it takes
@@ -81,6 +95,7 @@ impl Journal {
             max_bytes: DEFAULT_MAX_BYTES,
             pending_writes: Vec::new(),
             pending_deletes: Vec::new(),
+            pending_frees: Vec::new(),
             chunk_pool: std::array::from_fn(|_| {
                 (0..CHUNK_POOL_PER_TRACK)
                     .map(|_| Vec::with_capacity(CHUNK_SAMPLES))
@@ -243,6 +258,9 @@ impl Journal {
     /// target size - shared by `flush_pending` (chunks whose bytes just
     /// made it to disk) and `release_entry_payload` (chunks that never
     /// needed to; either way, the reserve gets them back the same way).
+    /// Whatever doesn't fit back (see `pending_frees`'s doc comment)
+    /// is parked there instead of dropped in place - this function must
+    /// stay realtime-safe itself, since one of its callers is.
     fn reclaim_chunks(&mut self, track: usize, chunks: Vec<Vec<i16>>) {
         for mut chunk in chunks {
             chunk.clear();
@@ -250,6 +268,8 @@ impl Journal {
                 && self.chunk_pool[track].len() < CHUNK_POOL_PER_TRACK
             {
                 self.chunk_pool[track].push(chunk);
+            } else {
+                self.pending_frees.push(chunk);
             }
         }
     }
@@ -273,6 +293,10 @@ impl Journal {
             // the realtime thread. See record.rs's module doc.
             self.reclaim_chunks(track, chunks);
         }
+        // Whatever `reclaim_chunks` couldn't return to a reserve, on
+        // this call or an earlier realtime-thread one, actually drops
+        // here - the one place that's always off the realtime thread.
+        self.pending_frees.clear();
         Ok(())
     }
 
@@ -465,6 +489,49 @@ mod tests {
             recovered.len(),
             reserve_len,
             "the evicted entry's chunk must come back, not be dropped"
+        );
+    }
+
+    #[test]
+    fn reclaiming_more_chunks_than_the_reserve_holds_defers_the_extra_frees() {
+        // Regression for a real bug an eighth review found in the fix
+        // above: reclaim_chunks dropped whatever didn't fit back into
+        // chunk_pool right there, in place - fine when called from
+        // flush_pending (already off the realtime thread), a real
+        // REQ-902 violation when called from release_entry_payload,
+        // reachable from evict()/push_pass on the realtime thread. An
+        // overflow entry (more chunks than CHUNK_POOL_PER_TRACK, e.g. a
+        // take that ran past the reserve and fell back to ordinary
+        // allocation for the rest) evicted while still pending used to
+        // deallocate the extra chunks on that thread.
+        let dir = TempDir::new("reclaim-overflow");
+        let mut j = Journal::new(&dir.0).unwrap();
+        // The reserve starts pre-filled (Journal::new) - drain it first
+        // so reclaim_chunks below has room to actually refill up to the
+        // cap, rather than every incoming chunk overflowing trivially.
+        j.take_spares(0);
+
+        let extra = 3;
+        let chunks: Vec<Vec<i16>> = (0..CHUNK_POOL_PER_TRACK + extra)
+            .map(|_| Vec::with_capacity(CHUNK_SAMPLES))
+            .collect();
+        j.reclaim_chunks(0, chunks);
+
+        assert_eq!(
+            j.chunk_pool[0].len(),
+            CHUNK_POOL_PER_TRACK,
+            "reserve fills to its cap, not past it"
+        );
+        assert_eq!(
+            j.pending_frees.len(),
+            extra,
+            "the overflow must be parked, not dropped in place"
+        );
+
+        j.flush_pending().unwrap();
+        assert!(
+            j.pending_frees.is_empty(),
+            "flush_pending is the off-thread checkpoint that actually drops them"
         );
     }
 
