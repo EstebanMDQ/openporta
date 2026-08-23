@@ -1318,7 +1318,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       ui keeps building; the bus fader/mute strip is M7.15. M3.1 got a
       superseded-by-M7 note appended rather than being edited. Full
       gate green, no references to the deleted paths remain.
-- [ ] M7.11 porta-engine: generation_loss.rs REQ-403 rewrite, in
+- [x] M7.11 porta-engine: generation_loss.rs REQ-403 rewrite, in
       place - prime (bounce once with tracks 1-4 unmuted), then mute
       all four and bounce three more times, measuring generations
       2/3/4 (bus re-printing only its own prior content, identical
@@ -1326,6 +1326,17 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       decay and monotonic noise-floor rise across gens 2-4,
       reproducible, tolerating a few hundred samples of the accepted
       per-generation latency drift - no exact-alignment assertion)
+      Done 2026-08-23. REQ-403 now measures REAL bounce generations
+      instead of track-to-track passes standing in for them: prime the
+      bus from a track, mute all four, then bounce three more times so
+      each generation re-prints only the bus's own prior content -
+      identical input conditions per generation, which is what makes
+      the three measurements comparable. Monotonic 8kHz decay and
+      monotonic noise-floor rise across gens 2-4, both with audible
+      magnitude floors. Windows are generous rather than sample-aligned
+      (each generation adds ~480 samples of flutter delay - accepted
+      drift, deliberately not asserted against). Added a
+      bounce-path reproducibility test alongside. Full gate green.
 - [ ] M7.12 porta-engine acceptance tests (+ a Pearson correlation
       helper in porta-testkit beside band_energy_db, not inline in a
       test): stereo image - hard-left source, bounce twice, right

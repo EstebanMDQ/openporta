@@ -2,12 +2,15 @@
 //! same material must get progressively duller and noisier, the way a
 //! real 4-track does when you bounce to free up tracks.
 //!
-//! Each generation is a record pass: the previous track's tape content is
-//! fed back in and printed to the next track, running the character chain
-//! again. Bounce (M3.1) is the same mechanism with a summed input, so
-//! this test covers the mechanic bounce depends on.
+//! Since change 001 this measures REAL bounce generations, not
+//! track-to-track passes standing in for them: prime the bus with one
+//! bounce, then mute all four tracks and bounce again and again, so
+//! each generation re-prints only the bus's own prior content through
+//! the character chain. Identical input conditions per generation,
+//! which is what makes the comparison across them meaningful.
 
 use porta_engine::engine::Engine;
+use porta_engine::tape::BusChannel;
 use porta_engine::NUM_TRACKS;
 use porta_testkit::meter::rms_dbfs;
 use porta_testkit::signal::{silence, sine};
@@ -73,6 +76,34 @@ fn read_track(engine: &Engine, track: usize, len: usize) -> Vec<f32> {
     out
 }
 
+/// Roll a bounce pass over `samples` from position 0.
+fn bounce(engine: &mut Engine, samples: usize) {
+    engine.seek(0);
+    engine.set_bus_armed(true);
+    engine.record();
+    let quiet = silence(BLOCK);
+    let inputs: [&[f32]; NUM_TRACKS] = [&quiet, &quiet, &quiet, &quiet];
+    let mut l = vec![0.0; BLOCK];
+    let mut r = vec![0.0; BLOCK];
+    let mut done = 0;
+    while done < samples {
+        let want = BLOCK.min(samples - done);
+        let n = engine.process_block(&inputs, &mut l[..want], &mut r[..want]);
+        if n == 0 {
+            break;
+        }
+        done += n;
+    }
+    engine.stop();
+    engine.set_bus_armed(false);
+}
+
+fn read_bus(engine: &Engine, len: usize) -> Vec<f32> {
+    let mut out = vec![0.0; len];
+    engine.tape().read_bus(BusChannel::Left, 0, &mut out);
+    out
+}
+
 #[test]
 fn generations_get_duller_and_noisier() {
     let dir = TempDir::new("three-generations");
@@ -83,19 +114,32 @@ fn generations_get_duller_and_noisier() {
 
     let mut engine = Engine::create(&dir.0, 200_000, 7).unwrap();
     record_onto(&mut engine, 0, &source);
-    let gen1 = read_track(&engine, 0, TAKE_LEN);
-    record_onto(&mut engine, 1, &gen1);
-    let gen2 = read_track(&engine, 1, TAKE_LEN);
-    record_onto(&mut engine, 2, &gen2);
-    let gen3 = read_track(&engine, 2, TAKE_LEN);
+
+    // Generation 1 primes the bus from the track. From here on the
+    // tracks are muted, so every later generation re-prints only what
+    // the bus already held - the same input condition each time, which
+    // is what makes the three measurements comparable.
+    bounce(&mut engine, TAKE_LEN);
+    for t in 0..NUM_TRACKS {
+        engine.mixer().set_muted(t, true);
+    }
+    bounce(&mut engine, TAKE_LEN);
+    let gen2 = read_bus(&engine, TAKE_LEN);
+    bounce(&mut engine, TAKE_LEN);
+    let gen3 = read_bus(&engine, TAKE_LEN);
+    bounce(&mut engine, TAKE_LEN);
+    let gen4 = read_bus(&engine, TAKE_LEN);
 
     // Skip the punch crossfade and delay-line fill at the head of each
-    // generation, and stay clear of the tone/silence boundary.
+    // generation, and stay clear of the tone/silence boundary. The
+    // windows are generous rather than sample-aligned: each generation
+    // adds ~480 samples of flutter delay, an accepted drift this test
+    // deliberately does not assert alignment against.
     let tone = |g: &[f32]| band_energy_db(&g[8192..TONE_LEN - 8192], 7000.0, 9000.0);
-    let floor = |g: &[f32]| rms_dbfs(&g[TONE_LEN + 8192..TAKE_LEN - 4096]);
+    let floor = |g: &[f32]| rms_dbfs(&g[TONE_LEN + 8192..TAKE_LEN - 8192]);
 
-    let tones = [tone(&gen1), tone(&gen2), tone(&gen3)];
-    let floors = [floor(&gen1), floor(&gen2), floor(&gen3)];
+    let tones = [tone(&gen2), tone(&gen3), tone(&gen4)];
+    let floors = [floor(&gen2), floor(&gen3), floor(&gen4)];
 
     assert!(
         tones[1] < tones[0] && tones[2] < tones[1],
@@ -115,6 +159,27 @@ fn generations_get_duller_and_noisier() {
         floors[2] - floors[0] > 2.0,
         "noise floor only rose {:.1} dB over three generations",
         floors[2] - floors[0]
+    );
+}
+
+#[test]
+fn bounce_generations_are_reproducible() {
+    // REQ-702 across the bounce path specifically.
+    let render = |name: &str| {
+        let dir = TempDir::new(name);
+        let mut engine = Engine::create(&dir.0, 200_000, 1979).unwrap();
+        record_onto(&mut engine, 0, &sine(1000.0, -6.0, 24_000));
+        bounce(&mut engine, 24_000);
+        for t in 0..NUM_TRACKS {
+            engine.mixer().set_muted(t, true);
+        }
+        bounce(&mut engine, 24_000);
+        read_bus(&engine, 24_000)
+    };
+    assert_eq!(
+        render("bounce-repro-a"),
+        render("bounce-repro-b"),
+        "same cassette seed must produce identical bounce generations"
     );
 }
 
