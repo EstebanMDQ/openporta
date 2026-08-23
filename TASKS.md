@@ -1076,13 +1076,26 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       different pass first, distinct per-channel seeds, distinct
       content per channel), and empty-post-half safety + crush landing
       there when enabled. Full gate green, golden byte-identical.
-- [ ] M7.3 porta-engine: Tape gains the stereo bounce bus - an
+- [x] M7.3 porta-engine: Tape gains the stereo bounce bus - an
       explicit dedicated field (NOT an appended Tape.tracks element:
       0..NUM_TRACKS loops would silently skip it), fixed cassette
       length, 2 x i16, region read/write per channel, its own dirty-
       chunk bitmap. REQ-101/401. (verify: bus roundtrip, bounds, and
       dirty tracking; tracks 1-4 byte-identical across bus writes; no
       track-indexed API can address the bus)
+      Done 2026-08-23. Refactored the per-channel storage mechanics
+      (read/read_raw/write_raw/chunk/dirty) down into `Track` so the bus
+      reuses them rather than duplicating; `Tape`'s track methods now
+      delegate, behavior unchanged (golden byte-identical). The bus is a
+      dedicated `bus: [Track; 2]` field addressed by a `BusChannel`
+      enum, not a usize - so the "no track-indexed API can address the
+      bus" property is compile-time, not a convention: track methods
+      take a usize into `tracks`, bus methods take a BusChannel, neither
+      can reach the other's storage. 5 new tests: per-channel roundtrip
+      (channels don't share storage), truncate/zero-fill at the tape
+      end, per-channel dirty tracking that leaves the other channel and
+      all 4 tracks clean, both-directions audio isolation (REQ-306's
+      symmetry clause), and short-tail chunk access. Full gate green.
 - [ ] M7.4 porta-engine: Mixer::mix_block split into sum_tracks (ticks
       each track's fader/pan ramps exactly once per sample; produces
       the monitor sum gated by a new excluded-from-sum-but-still-
