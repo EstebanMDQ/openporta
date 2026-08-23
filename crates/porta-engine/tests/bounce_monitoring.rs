@@ -3,7 +3,6 @@
 //! could never pass (a review of change 001 caught exactly that).
 
 use porta_engine::engine::Engine;
-use porta_engine::tape::BusChannel;
 use porta_engine::NUM_TRACKS;
 use porta_testkit::meter::rms_dbfs;
 use porta_testkit::signal::{silence, sine};
