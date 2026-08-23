@@ -1,6 +1,6 @@
 # openporta Specification
 
-Version 1.1 (amended by change 001, stereo bounce buss - see
+Version 1.1 (amended by change 001, stereo bounce bus - see
 `openspec/changes/001-stereo-repeatable-bounce.md` for the full design
 and its 13-revision review history). This document is the constitution
 of the project. The decisions
@@ -24,11 +24,11 @@ Target users: musicians who want the commitment and character of a cassette
 In scope for v1:
 
 - 4 mono tracks, one stereo master output, plus one fixed, mix-only
-  stereo bounce buss (not a 5th track: no arm for live input, no pan,
+  stereo bounce bus (not a 5th track: no arm for live input, no pan,
   exists only to receive a printed mix, cannot be added to or removed -
   REQ-101/404)
 - Record, overdub, punch-in/out, destructive real-time bounce onto the
-  buss, undo
+  bus, undo
 - Baked-in tape character with generation loss
 - Project persistence and WAV export
 - Offline (headless) operation, realtime operation on macOS, then
@@ -49,14 +49,14 @@ Explicitly OUT of v1 (do not implement, do not prepare abstractions for):
 - Cassette: a project. Has a fixed tape length and a fixed TapeCharacter
   chosen at creation.
 - Tape: the audio storage. 4 fixed-length mono i16 buffers plus one
-  fixed-length stereo i16 buffer (the bounce buss), all at 48kHz.
+  fixed-length stereo i16 buffer (the bounce bus), all at 48kHz.
 - Record pass: one continuous record engagement on one track or the
-  bounce buss, from punch-in to punch-out. The unit of undo. A pass onto
-  the buss writes both channels atomically as one pass for undo purposes
+  bounce bus, from punch-in to punch-out. The unit of undo. A pass onto
+  the bus writes both channels atomically as one pass for undo purposes
   (REQ-502).
-- Bounce: a real-time record pass onto the dedicated stereo bounce buss,
+- Bounce: a real-time record pass onto the dedicated stereo bounce bus,
   whose input is the pre-master-fader sum of tracks 1-4 (at their live
-  fader/pan/mute) plus the buss's own existing content (at its own
+  fader/pan/mute) plus the bus's own existing content (at its own
   fader/mute).
 - Generation loss: cumulative degradation from repeated record passes over
   the same material.
@@ -71,7 +71,7 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
 
 - REQ-101 A cassette MUST have exactly 4 mono tracks and a fixed tape length
   set at creation (default 15 minutes, max 30), plus one always-stereo
-  bounce buss with a different capability set (mix-only input, no arm for
+  bounce bus with a different capability set (mix-only input, no arm for
   ordinary recording, mutually exclusive with tracks 1-4's arm state -
   REQ-404/405). The 4-mono-track guarantee for tracks 1-4 themselves is
   unchanged.
@@ -94,7 +94,7 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
 ### 4.3 Recording
 
 - REQ-301 Recording MUST engage only on armed tracks or the armed bounce
-  buss, and MUST overwrite tape content (destructive).
+  bus, and MUST overwrite tape content (destructive).
 - REQ-302 Punch-in and punch-out boundaries MUST use a 5ms linear crossfade
   between old tape content and new signal; boundaries MUST NOT produce
   clicks detectable by the testkit click detector.
@@ -105,17 +105,17 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
 - REQ-305 Monitoring while recording MUST be post-chain (the user hears what
   the tape receives). [manual for the listening part; routing is testable]
 - REQ-306 Unarmed tracks MUST be byte-identical before and after any record
-  pass. Symmetrically, the bounce buss MUST be byte-identical across an
+  pass. Symmetrically, the bounce bus MUST be byte-identical across an
   ordinary track pass, and tracks 1-4 MUST be byte-identical across a
   bounce (both already guaranteed by REQ-405's mutual exclusivity).
 
 ### 4.4 Bounce
 
 - REQ-401 Bounce MUST be implemented as a real-time record pass onto the
-  dedicated stereo bounce buss, whose input is the pre-master-fader sum
-  of tracks 1-4 (each at its live fader/pan/mute) plus the buss's own
+  dedicated stereo bounce bus, whose input is the pre-master-fader sum
+  of tracks 1-4 (each at its live fader/pan/mute) plus the bus's own
   existing content (at its own fader/mute). There is no separate
-  blocking bounce command: bouncing is arming the buss and pressing
+  blocking bounce command: bouncing is arming the bus and pressing
   Record.
 - REQ-402 Bounce MUST apply the character chain (generation loss
   compounds): each channel runs its own independent stage set
@@ -125,36 +125,36 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
 - REQ-403 Three successive bounce generations of broadband material MUST
   show monotonically decreasing high-frequency band energy and monotonically
   increasing noise floor. This is the product acceptance test.
-- REQ-404 The bounce buss MUST have its own arm-like flag, independent
+- REQ-404 The bounce bus MUST have its own arm-like flag, independent
   of tracks 1-4's armed state, with no ordinary-input recording
   capability.
-- REQ-405 Arming the bounce buss and arming any of tracks 1-4 MUST be
+- REQ-405 Arming the bounce bus and arming any of tracks 1-4 MUST be
   mutually exclusive; arming one MUST clear the other. A direct
   consequence: no track's live input can be monitored while a bounce
   pass is open (input-monitor preview requires an armed track).
   Intended, not an oversight.
 - REQ-406 The master fader MUST NOT be baked into any signal written to
-  tape (tracks 1-4 or the bounce buss); a bounce pass's input MUST be
+  tape (tracks 1-4 or the bounce bus); a bounce pass's input MUST be
   computed before any master-fader multiplication.
 - REQ-407 A bounce pass's own prior content at a given tape position
   MUST be read before the pass's new value is written to that position
   (block-local read-before-write; no lookahead).
 - REQ-408 While a bounce pass is open, tracks 1-4's own contribution to
-  the audible output MUST be silent; the buss's contribution MUST be the
-  pass's post-chain printed signal flowing through the buss's own
+  the audible output MUST be silent; the bus's contribution MUST be the
+  pass's post-chain printed signal flowing through the bus's own
   smoothed fader/mute, the same mixer path ordinary playback uses. The
-  buss's smoothed gain value MUST be computed once per sample and reused
+  bus's smoothed gain value MUST be computed once per sample and reused
   for both its contribution to the print input (REQ-406) and the monitor
   output at that same sample position - never advanced twice for one
   sample. Track-level metering MUST NOT be silenced by this - it keeps
   reflecting each track's own playback contribution (post-fader,
   pre-pan).
-- REQ-409 The bounce buss MUST have its own volume fader and mute,
+- REQ-409 The bounce bus MUST have its own volume fader and mute,
   independent of tracks 1-4's (REQ-601) - no pan, since it is already
   stereo. Both MUST be smoothed the same way every other mixer control
   is, and both MUST persist in the project manifest. REQ-406's carve-out
   to REQ-602 (controls baked into the print during a bounce) extends to
-  the buss's own fader/mute.
+  the bus's own fader/mute.
 
 ### 4.5 Undo
 
@@ -178,7 +178,7 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
 - REQ-602 Mixer moves MUST be non-destructive (playback-side only) and MUST
   be smoothed so parameter jumps produce no clicks. One narrow, explicit
   carve-out: while feeding an active bounce pass, tracks 1-4's
-  fader/pan/mute and the buss's own fader/mute ARE baked into what gets
+  fader/pan/mute and the bus's own fader/mute ARE baked into what gets
   printed (that is the point of printing a mix - REQ-401/406/409); the
   controls themselves stay non-destructively adjustable afterward.
 - (REQ-603 deleted by change 001: bounce is no longer a mono sum, and
@@ -208,9 +208,9 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
 ### 4.8 Persistence and export
 
 - REQ-801 A project MUST be a directory containing a JSON manifest, raw i16
-  track files (including the bounce buss's two channel files, whose
-  absence reads as "never bounced yet" so pre-buss cassettes open
-  unchanged), and the undo journal. The manifest persists the buss's
+  track files (including the bounce bus's two channel files, whose
+  absence reads as "never bounced yet" so pre-bus cassettes open
+  unchanged), and the undo journal. The manifest persists the bus's
   fader/mute alongside the per-track mixer state.
 - REQ-802 Saves MUST write only dirty 5-second chunks of tape and MUST occur
   only on explicit save or transport stop, never during recording.
@@ -248,7 +248,7 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
 - M1: scripted record/playback roundtrip; punch boundaries click-free;
   undo restores byte-exactly; unarmed tracks untouched.
 - M2: REQ-403 generation-loss test passes (procedure rewritten under
-  change 001 for the buss-based bounce); all DSP numeric assertions
+  change 001 for the bus-based bounce); all DSP numeric assertions
   pass; bit-reproducible renders.
 - M3: export matches playback; the single golden render passes (golden
   regenerated once under change 001 - old `{"op":"bounce"}` scripts and
