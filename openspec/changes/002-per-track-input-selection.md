@@ -104,7 +104,10 @@ UI field, parsed by one shared function:
   silently ignored and the session recording from whatever map was
   remembered - a silent wrong-channel take, precisely the failure class
   the device-config work exists to prevent. Three lines of code, not
-  ceremony.
+  ceremony. Same treatment for a present-but-valueless `--in-map` (a
+  second review noted `flag()` returns `None` for a trailing flag with
+  no value, which would silently fall back to the remembered map -
+  same failure class, same one-line fix).
 - The connect banner's contiguous wording (`channels N-M -> tracks
   1-K ... the rest record silence`) is rewritten as a per-track list
   (e.g. `inputs: track1<-ch3 track2<-ch4 track3<-ch5 track4<-ch6`, with
@@ -127,16 +130,34 @@ UI field, parsed by one shared function:
   offset field is today; a successful connect remembers what it used,
   silently, same as every other device setting (no separate save
   action).
+- **A parse failure MUST block the connect and surface the error - it
+  MUST NOT fall back to a default or remembered map** (a second review
+  caught that the offset field's current shape,
+  `.parse::<usize>().unwrap_or(0)`, would turn a typo like `3;4;5;6`
+  into a silent wrong-channel connect - and one of the two call sites
+  is the *auto-connect* path that runs at startup with no button
+  press). Normative in REQ-908 below.
 
 ### Status reporting (a first review found "reported as inactive" had
 no surface that could express it)
 
-- The UI's `connection_status` line gains a compact per-track channel
-  list: `connected: out <name> / in <name> [3,-,5,6]`, with `-` for a
-  track that is unassigned or whose channel the device doesn't provide.
-  Today that line carries no channel information at all, so this is the
-  one UI addition beyond the Settings field.
+- The UI's **persistent** status line gains a compact per-track channel
+  list: `connected: out <name> / in <name> [3,-,5,6] (period N)`, with
+  `-` for a track that is unassigned or whose channel the device
+  doesn't provide. Pinned precisely (a second review caught two
+  distinct strings being conflated): the list goes on the
+  `connection_status` built in `snapshot()` and refreshed every tick -
+  the persistent one - keeping its existing `(period N)` suffix; the
+  transient `status_text` message `connect()` returns is a different
+  string, and putting the list only there would show the channels for
+  one tick before the next refresh wiped them.
 - The CLI banner change above is the same information in long form.
+- Both status formatters (the CLI long form and the UI `[3,-,5,6]`
+  short form) are **pure functions in `input_map.rs` with their own
+  tests** - this is what makes REQ-908's reporting clause headlessly
+  verifiable rather than an untested string; the manual checklist item
+  additionally says to eyeball that the reported list names the right
+  channel per track on the real device.
 - `RealtimeSession`'s `input_channel_offset: usize` field becomes the
   resolved per-track map (`[Option<usize>; NUM_TRACKS]`), and
   `input_tracks` becomes a *count of assigned tracks*, not a prefix
@@ -163,6 +184,27 @@ no surface that could express it)
 - The `device_config.rs` module doc comment's "deliberately just an
   offset" paragraph is rewritten to record that the confirmed use case
   arrived and this proposal took the predicted additive path.
+- **The serde types move with the tests (a second review caught the F1
+  hole quietly reappearing here)**: three of the four migration-test
+  bullets below are serde-level, but `DeviceSettings` lives in the
+  feature-gated `device_config.rs` - written that way, those tests
+  would land back in the gated module and never run in CI. So the
+  serde `DeviceSettings`/`DeviceConfig` form (plain serde, no cpal
+  types) is **defined in `input_map.rs`** along with the migration
+  rule; `device_config.rs` keeps only the file I/O (path resolution,
+  read/write) and re-exports. Implementation note, same class:
+  `input_map.rs` is an ungated module whose callers are all gated, so
+  the default-feature clippy gate sees dead code - it needs the same
+  `#[cfg_attr(not(feature = "realtime"), allow(dead_code))]` treatment
+  `device_config.rs` already uses.
+- **Zero-assigned maps are never persisted, stated rather than fallen
+  into** (a second review traced it): "no input stream opens" means
+  `input_device: None`, which gates both `remember()` call sites - so
+  connecting with an all-`-` map leaves the previously remembered map
+  in `audio.json`, and the next launch pre-fills that older map. This
+  is the right outcome (a session with no inputs expressed no wiring
+  opinion worth remembering), but it is an outcome this proposal
+  chooses, not an accident.
 
 ### Capture wiring (`realtime.rs`) - both sides of the ring
 
@@ -249,7 +291,9 @@ with section 5's platform requirements.
   settable per track from both the UI and the CLI, using 1-based
   channel numbers matching the probe command's display, and each
   surface MUST report per-track assignment status (including inactive
-  tracks) at connect time.
+  tracks) at connect time. A malformed assignment string MUST block the
+  connect and surface the error - it MUST NOT fall back to a default or
+  remembered map.
 - **REQ-909 (new, adapter)**: Assignments MUST persist per input
   device; configurations saved by prior versions (channel-offset form)
   MUST load with identical routing and without user intervention.
@@ -291,6 +335,9 @@ All in the ungated `input_map.rs` so they actually run in the CI gate:
   entries (that track silent, others live); duplicate entries (both
   tracks fed); requested channel count = max(assigned)+1 clamped to
   device max; zero assigned -> no stream.
+- Status-formatter tests: the CLI long form and the UI short form
+  (`[3,-,5,6]`) against full, sparse, and out-of-range maps - REQ-908's
+  reporting clause, verified headlessly.
 - [manual, added to docs/manual-checklist.md M6] On the Pi with the
   L6: `--in-map 3,4,5,6` reproduces exactly the current
   `--in-offset 2` behavior; a scrambled map (`6,5,4,3`) routes jacks
@@ -349,5 +396,26 @@ hazard named; the probe-parity channel-order assumption stated and
 exercised by a new narrower-than-probe manual check; duplicates
 documented as not-byte-identical on tape (REQ-304 seeding); and the
 reference-hardware identity argument (a Porta 424 channel has an input
-select switch) added to Motivation. Ready for a second spec-reviewer
-pass.
+select switch) added to Motivation.
+
+**v3 (this revision)**: a second review returned **APPROVE WITH
+NOTES** - all four v1 blockers verified genuinely fixed against the
+code, every load-bearing claim checked, nothing left as a design
+defect. Its notes, folded in here: the migration tests as written
+would have landed back in the feature-gated `device_config.rs` and
+never run in CI - the F1 hole reappearing for exactly the coverage
+this proposal promises - so the serde `DeviceSettings` form now moves
+into `input_map.rs` with the tests, `device_config.rs` keeping only
+file I/O (plus the `cfg_attr(allow(dead_code))` note for the
+default-feature clippy gate); a UI parse failure now normatively
+blocks the connect instead of `unwrap_or`-ing into a silent
+wrong-channel default (the auto-connect path made this a real
+startup-time hazard, not just a button-press one); both status
+formatters become pure functions in `input_map.rs` with tests, making
+REQ-908's reporting clause headlessly verifiable; the status list is
+pinned to `snapshot()`'s persistent `connection_status` (keeping its
+period suffix), not the transient `status_text` the next tick would
+wipe; zero-assigned maps are documented as never persisted (the
+`remember()` gates make it fall out that way - now a stated choice,
+not an accident); and a valueless `--in-map` errors the same way
+`--in-offset` does. Awaiting owner sign-off.
