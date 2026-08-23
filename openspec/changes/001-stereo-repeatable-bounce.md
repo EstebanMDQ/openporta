@@ -2,9 +2,9 @@
 
 ## Motivation
 
-Requested directly by the owner while using the app, then reshaped ten
-times after review found real design holes (see "History" at the end -
-this is now v11). The underlying problems are unchanged:
+Requested directly by the owner while using the app, then reshaped
+eleven times after review found real design holes (see "History" at the
+end - this is now v12). The underlying problems are unchanged:
 
 1. **Stereo information is lost.** Today's bounce is a mono sum of
    tracks 1-3 onto track 4; anything panned comes out center.
@@ -291,19 +291,33 @@ it. So for those first `XFADE_SAMPLES`, live-monitored and
 replayed-after diverge by up to the full old-vs-new difference, not by
 dither noise - a real, much larger gap than the one this paragraph
 previously named. Symmetrically, `RecordPass::finish` *retroactively*
-rewrites the last `XFADE_SAMPLES` already written, blending them back
-toward the displaced content, **after** those same positions were
-already monitored live at their un-faded values during the pass -
-replaying them afterward reads the retroactively-blended tape, not what
-was heard live. Both boundaries are the same, already-accepted
-mechanism REQ-302 already requires for every punch in this engine
-(nothing new is being introduced here), but REQ-408's own claim has to
-name them explicitly rather than gesture at a smaller, unrelated
-smoothing effect: **"monitored live matches replayed-after, within
-dither's noise floor" holds only for the stretch of a bounce pass clear
-of both its punch-in and punch-out crossfade windows** - the ramp on `g`
-itself settles well within that same opening window and needs no
-separate caveat once REQ-302's is stated.
+rewrites the last `min(XFADE_SAMPLES, pass_len)` already written,
+blending them back toward the displaced content, **after** those same
+positions were already monitored live at their un-faded values during
+the pass - replaying them afterward reads the retroactively-blended
+tape, not what was heard live. Not unconditional, though (an eleventh
+review caught this stated too broadly): `finish` skips the out-fade
+entirely when the pass ran to the very end of the tape (`end >=
+tape.len_samples()` returns early - there's nothing beyond the end to
+blend back into), so a bounce that runs out the tape has a punch-in
+boundary but no punch-out one. Both boundaries, where they exist, are
+the same, already-accepted mechanism REQ-302 already requires for every
+punch in this engine (nothing new is being introduced here) - and worth
+one clarifying clause: REQ-302's crossfade lives on *tape content*
+only, at both ends; the monitor slot is never faded, for the buss here
+exactly as for an ordinary armed track's `playback[t] = processed[t]`
+today. REQ-408's own claim has to name these mechanisms explicitly
+rather than gesture at a smaller, unrelated smoothing effect:
+**"monitored live matches replayed-after, within dither's noise floor"
+holds only for the stretch of a bounce pass clear of both its punch-in
+and punch-out crossfade windows.** The ramp on `g` needs no separate
+caveat once REQ-302's is stated - though not because it settles "well
+within" the opening window: `SMOOTH_SAMPLES` (`SAMPLE_RATE / 200`) and
+`XFADE_SAMPLES` (`SAMPLE_RATE * 5 / 1000`) are both exactly 240 samples,
+5ms, coincident by construction with zero margin (an eleventh review
+caught the earlier wording overstating this). If either constant ever
+moves independently, this sentence is the one that becomes false first -
+flagged so the coupling is visible rather than accidental.
 
 **Tick-once, not twice, per sample (a sixth review caught this)**: the
 buss's smoothed gain is needed at two points for one sample - once
@@ -860,17 +874,31 @@ here. Four new ops, matching the shape of what's already there:
       is simply never consulted; the extra accumulator costs one more
       multiply-add per sample, not a second pass over the data.
       **Storage, named explicitly (a tenth review found this bullet
-      specified the computation but not where its output lives)**: the
-      print sum has to survive from `sum_tracks` through the
-      between-phases step below, where the buss's own prior-content term
-      is added to it before it feeds the character chain - two more
-      `[f32; MAX_BLOCK]` buffers (L/R), same size class as the gain
-      scratch buffer two bullets down, owned by `Engine` (it's the
-      caller that threads them between `sum_tracks` and the buss's chain,
-      not something `Mixer` needs to remember between calls) and
-      allocated once, off the realtime thread, at cassette open/create,
-      alongside `Engine`'s other fixed per-track buffers (`processed`,
-      `playback`).
+      specified the computation but not where its output lives; an
+      eleventh found the buss's `playback` slot - referenced throughout
+      this design - was itself never in the allocation inventory
+      either, the same omission class one step over)**: the buss needs
+      two MAX_BLOCK-sized L/R buffer pairs, both owned by `Engine`,
+      both allocated once, off the realtime thread, at cassette
+      open/create, exactly mirroring the `processed`/`playback` pair
+      every ordinary track already has (which are `Vec`s sized to
+      MAX_BLOCK at construction, not fixed arrays - an eleventh review
+      caught this document asserting a `[f32; MAX_BLOCK]` type the
+      codebase doesn't use; "a MAX_BLOCK-sized buffer allocated once at
+      open/create" is the actual claim). The first pair is the **print
+      buffers** - the buss's equivalent of a track's `processed`:
+      `sum_tracks` writes the print sum into them, the between-phases
+      step adds the buss's prior-content term and runs the character
+      chain over them in place (`AudioProcessor::process` is in-place),
+      leaving `W(t)` in the same buffers. The second pair is the
+      **buss's `playback` slot** - the buss's equivalent of a track's
+      `playback`: during a pass it receives a copy of `W(t)` from the
+      print buffers (the same `playback = processed` copy tracks
+      already do); when no bounce is open it instead holds the ordinary
+      tape readback of the buss's stored content. `finish_mix` only
+      ever reads the playback pair, never the print pair - which is
+      what keeps phase 2 identical in shape whether or not a bounce is
+      open.
     - **Between phase 1 and phase 2, for the buss, when a bounce pass is
       open (not `mix_block`'s concern at all)**: `Engine::process_block`
       adds the
@@ -1047,29 +1075,42 @@ here. Four new ops, matching the shape of what's already there:
   time the buss is armed (either is fine; what matters is *not* on the
   realtime thread). Reseeding per pass reuses the same mechanism this
   proposal's REQ-902 audit already added and shipped for ordinary tracks
-  - `AudioProcessor::reseed`/`Chain::reseed_stage` - **applied narrowly,
-  not uniformly (a tenth review found the previous version both
-  overclaimed what needed changing and left a panic hazard)**: splitting
-  around flutter produces two independent per-channel `Chain`s, a
-  pre-flutter one (`[Saturation, Hiss, Bandwidth]`) and a post-flutter
-  one (`[Crush]` if enabled, **empty otherwise** - crush is opt-in, per
-  `crush_is_opt_in`). Only Hiss carries seeded state; Saturation,
-  Bandwidth, and Crush don't, same as in the unsplit chain. So only the
-  pre-flutter `Chain`'s `reseed_stage` needs calling, at its own named
-  index (a `HISS_STAGE` constant for the *split* builder, analogous to
-  `TapeCharacter::HISS_STAGE`/`FLUTTER_STAGE` and kept next to it the
-  same reason - so the two can't drift apart) - the post-flutter `Chain`
-  only ever needs a plain `reset()` (its own `AudioProcessor` impl
-  already handles the empty case safely, since it just iterates whatever
-  stages it has). `StereoFlutter`'s shared modulator is a different
-  matter: `FlutterModulator` (the piece "Shared flutter" above splits
-  out of `Flutter`) isn't itself an `AudioProcessor` - it emits a delay
-  value, not audio - so it needs its own inherent `reseed(seed: u32)`
-  method, not a trait override; a small, mechanical addition following
-  the same internal shape as `Flutter`'s own (already-shipped) `reseed`.
+  - `AudioProcessor::reseed`/`Chain::reseed_stage`. **The full per-pass
+  sequence, stated as a sequence (an eleventh review found the previous
+  narrowing - "only the pre-flutter chain's `reseed_stage` needs
+  calling" - dropped two real pieces of state on the floor: it read as
+  though `reseed_stage` alone sufficed for the pre-flutter chain, leaving
+  Bandwidth's biquad state carrying over between passes, and it never
+  reset `StereoFlutter`'s two `FlutterDelay` ring buffers at all -
+  ~480 samples (`CENTRE`) of the *previous* bounce's audio bleeding into
+  the next pass's punch-in, silently, in a way that also breaks the
+  reused-equals-fresh property `reseed_chain_matches_a_freshly_built_one`
+  established for tracks)**. Mirroring `TapeCharacter::reseed_chain`'s
+  own reset-then-reseed shape, per channel and per pass:
+  1. `reset()` **both** per-channel `Chain`s - the pre-flutter one
+     (`[Saturation, Hiss, Bandwidth]` - this is what clears Bandwidth's
+     biquads) and the post-flutter one (`[Crush]` if enabled, **empty
+     otherwise** - crush is opt-in, per `crush_is_opt_in`; `Chain`'s own
+     `reset` iterates whatever stages it has, so the empty case is safe).
+  2. `reseed_stage(HISS_STAGE, ...)` on the pre-flutter `Chain` only -
+     Hiss is the only seeded stage in either sub-chain; the `HISS_STAGE`
+     constant belongs to the *split* builder, kept next to it the same
+     way `TapeCharacter::HISS_STAGE`/`FLUTTER_STAGE` are kept next to
+     `build_chain`, so builder and reseeder can't drift apart.
+  3. `StereoFlutter::reseed(seed)` - an inherent method, not a trait
+     override (`FlutterModulator` isn't an `AudioProcessor`; it emits a
+     delay value, not audio), which MUST clear **both** `FlutterDelay`
+     rings and their write indices *and* reseed the shared modulator.
+     The invariant to hold it to: `StereoFlutter::reseed` clears exactly
+     the state `Flutter::reset` clears today (`ring`, `write`,
+     `wow_phase`, `walk`, `walk_lp`, `state`), just distributed across
+     three objects instead of one.
   Per-channel hiss still decorrelates L from R (REQ-702's `channel`
   term); the shared modulator reseeds once, at channel term 0 (see
-  "Shared flutter" above).
+  "Shared flutter" above). The natural regression test is the same
+  property already shipped for tracks: a reused, reseeded stereo pass
+  setup must produce output identical to freshly-built ones with the
+  same seeds.
 - **Latency accumulation across fold-forward bounces - decided, not left
   open (a sixth review correctly said this needs a real decision, not
   just an honest flag)**: `Flutter`'s ~480-sample (10ms) centre-tap delay
@@ -1208,36 +1249,61 @@ here. Four new ops, matching the shape of what's already there:
 - **New test, specified precisely (a sixth review pointed out the
   whole-output version can't pass; a seventh found the narrowed
   version's wording still ambiguous about what's being compared; a tenth
-  found the window it excluded was still wrong - see "Monitoring" above
-  for the worked-out claim this test checks)**: mute tracks 1-4
-  (isolating the buss's own contribution from the expected, accepted
-  tracks-1-4 jump), set a **cut**, already-settled buss fader (e.g. -6dB
-  via `Op::BounceFader`, set before punch-in so its smoothing ramp has
+  found the window it excluded was still wrong; an eleventh found it
+  could pass vacuously on silence - see "Monitoring" above for the
+  worked-out claim this test checks)**: first **prime the buss with real
+  content** - record material on tracks 1-4 and bounce once with them
+  unmuted, the same priming step REQ-403's rewritten procedure already
+  uses. Without this, muting tracks 1-4 below leaves `P(t) = 0` for the
+  whole measured pass (muted tracks contribute zero to the print sum
+  too - `target()` returns zero gain for a muted track, and both sums
+  accumulate from the identical scaled value), the crossfades blend
+  silence into silence, and the assertion passes without demonstrating
+  anything - including whether the excluded windows were even placed
+  correctly. Then, for the measured pass: mute tracks 1-4 (isolating the
+  buss's own now-non-silent contribution from the expected, accepted
+  tracks-1-4 jump), set a **cut**, already-settled buss fader (-6dB via
+  `Op::BounceFader`, set before punch-in so its smoothing ramp has
   converged - a cut, not a boost, since a boost would scale the dither
   error above the RMS bound below and the claim doesn't hold for that
   case), and bounce a region long enough that a middle stretch clear of
-  *both* crossfade windows exists. Capture the monitor output *live,
-  during* the pass, over that middle stretch only - clear of the first
-  `XFADE_SAMPLES` (`write_block`'s punch-in fade blends toward the
-  un-faded printed value the monitor slot holds, a real divergence, not
-  dither) **and** the last `XFADE_SAMPLES` (`finish`'s punch-out fade
-  retroactively rewrites what's on tape after those positions were
-  already monitored at their un-faded values - the position is known in
-  advance here since the test controls the pass length). Separately,
-  after the pass closes, seek back and *play back that same tape region*
-  fresh. **Assert the RMS of the per-sample difference between the two
-  captures is under ~0.5 LSB (~-96dBFS at 16-bit), not a per-sample
-  tolerance** (a ninth review corrected this: a per-sample bound would
-  need to cover the combined TPDF-plus-rounding worst case, +/-1.5 LSB,
-  which is loose enough to hide real bugs; RMS is both the tighter and
-  the actually-motivated check, since it's asserting the *distribution*
-  dither is supposed to produce, not just bounding its extremes) - see
-  "Monitoring" above for the derivation. This is "monitored live vs.
+  *both* crossfade windows exists, **ending short of the tape end**
+  (needed for the replay step anyway, and `finish` skips its out-fade
+  entirely at the tape end - see "Monitoring" above - so stopping short
+  is also what makes the punch-out boundary exist to exclude). Capture
+  the monitor output *live, during* the pass, over that middle stretch
+  only - clear of the first `XFADE_SAMPLES` (`write_block`'s punch-in
+  fade blends toward the un-faded printed value the monitor slot holds,
+  a real divergence, not dither) **and** the last `XFADE_SAMPLES`
+  (`finish`'s punch-out fade retroactively rewrites what's on tape after
+  those positions were already monitored at their un-faded values - the
+  live capture is just a buffer, so its tail is trimmed after the pass
+  closes, from the known total length). Separately, after the pass
+  closes, seek back and *play back that same tape region* fresh.
+  **Assert the RMS of the per-sample difference between the two captures
+  is under ~0.25 LSB (the ~0.5 LSB RMS dither error derived in
+  "Monitoring" above, scaled by the -6dB fader - stating the bound at
+  the chosen gain rather than leaving the un-scaled figure with silent
+  2x slack), not a per-sample tolerance** (a ninth review corrected
+  this: a per-sample bound would need to cover the combined
+  TPDF-plus-rounding worst case, +/-1.5 LSB, which is loose enough to
+  hide real bugs; RMS is both the tighter and the actually-motivated
+  check, since it's asserting the *distribution* dither is supposed to
+  produce, not just bounding its extremes). This is "monitored live vs.
   replayed after, same position," not "during the pass vs. what that
-  position would have sounded like un-bounced." A second, independent
-  assertion: each track's own meter still reflects its own playback
-  contribution during the pass rather than reading silent (REQ-408's
-  metering clause).
+  position would have sounded like un-bounced."
+- **New test, separate from the one above (an eleventh review caught
+  that folding REQ-408's metering assertion into the dither test
+  contradicts its own setup: that test *mutes* tracks 1-4, and `Mixer`'s
+  meter deliberately reads a muted track as silent -
+  `mute_silences_a_track_without_touching_its_fader` already asserts
+  exactly that - so "meters not silent" can never hold there, for a
+  reason unrelated to REQ-408)**: tracks 1-4 **unmuted** and carrying
+  real signal, a bounce pass open, assert each track's `track_level_db`
+  reads above the meter floor while the same block's audible output
+  contains no tracks-1-4 contribution - the exclude-flag-vs-meter
+  separation `sum_tracks` exists to provide, exercised directly
+  (REQ-408's metering clause).
 - **New test**: one Undo press after a bounce restores both channels
   atomically - no reachable state with one channel reverted and the
   other not (REQ-502/505).
@@ -1647,7 +1713,7 @@ never said where the buss's own chains get built or reseeded, now
 points at the same off-thread-build/in-place-reseed mechanism the REQ-902
 fix above just shipped for ordinary tracks.
 
-**v11 (this revision)**: a tenth review confirmed all six of round 9's
+**v11**: a tenth review confirmed all six of round 9's
 items land correctly (including re-verifying the shipped REQ-902 fix and
 the dither arithmetic independently against the actual code) and found
 one new blocking problem in the process. REQ-408's derivation named the
@@ -1687,4 +1753,50 @@ rather than left to be discovered. A missing test name
 (`bounce_leaves_the_source_tracks_alone`) and the scratch buffer's
 self-contradictory allocation site ("alongside per-pass setup," which
 this document itself says runs on the realtime thread) are also
-corrected. Ready for an eleventh spec-reviewer pass.
+corrected.
+
+**v12 (this revision)**: an eleventh review verified every one of round
+10's fixes against the code (including the crossfade mechanics in
+`write_block`/`finish` line by line) and found two blocking problems,
+both in material earlier rounds had already touched. The chain-splitting
+bullet's narrowed reseed guidance dropped two pieces of per-pass state:
+it read as though `reseed_stage(HISS_STAGE)` alone sufficed for the
+pre-flutter sub-chain (Bandwidth's biquads would carry over between
+passes), and it never reset `StereoFlutter`'s two `FlutterDelay` rings
+at all - ~480 samples of the previous bounce bleeding silently into the
+next pass's punch-in, breaking the reused-equals-fresh property the
+shipped REQ-902 fix established for tracks. Fixed by stating the full
+per-pass sequence as a numbered sequence mirroring `reseed_chain`'s own
+reset-then-reseed shape, with the invariant named: `StereoFlutter::reseed`
+clears exactly the state `Flutter::reset` clears today, distributed
+across three objects. Second, the REQ-408 test folded the metering
+assertion into a setup that mutes tracks 1-4 - and `Mixer`'s meter
+deliberately reads muted tracks as silent, so "meters not silent" could
+never hold there, for a reason unrelated to REQ-408. Split into its own
+test with unmuted tracks. Three medium findings: the dither-bound test
+could pass vacuously on silence (muted tracks contribute zero to the
+print sum too, and a fresh buss has no prior content - so the whole
+measured pass was silence compared against silence, including the
+crossfade windows whose exclusion it was meant to validate) - fixed by
+priming the buss with a real first bounce, the same step REQ-403's
+procedure already uses; the buss's `playback` slot was referenced
+throughout but never in the allocation inventory (the same omission
+class round 10 caught for the print sum, one step over) - resolved as a
+second Engine-owned MAX_BLOCK L/R pair mirroring tracks'
+`processed`/`playback` split, with `finish_mix` reading only the
+playback pair; and `finish`'s retroactive punch-out rewrite was stated
+as unconditional when the code skips it entirely at the tape end and
+fades `min(XFADE_SAMPLES, len)`, not always the full window - the
+derivation now says so and the test now ends short of the tape end.
+Two minor: "settles well within that same opening window" overstated
+the `g`-ramp margin (`SMOOTH_SAMPLES` and `XFADE_SAMPLES` are both
+exactly 240 - coincident by construction with zero margin, now flagged
+as a coupling that becomes false first if either constant moves), and
+the RMS bound is now stated at the chosen -6dB fader (~0.25 LSB) rather
+than leaving the un-scaled figure with silent 2x slack. The
+`[f32; MAX_BLOCK]` type assertion (the codebase's per-block buffers are
+`Vec`s, not fixed arrays - the third array-vs-Vec imprecision in as
+many rounds) and the reviewer's closing nit (REQ-302's crossfade lives
+on tape content only; the monitor slot is never faded, at either
+boundary, for buss and ordinary tracks alike) are also folded in. Ready
+for a twelfth spec-reviewer pass.
