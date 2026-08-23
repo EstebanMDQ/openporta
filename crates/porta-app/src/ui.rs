@@ -87,11 +87,14 @@ struct LiveState {
     transport_state: TransportState,
     playhead: usize,
     armed: [bool; NUM_TRACKS],
+    bus_armed: bool,
     muted: [bool; NUM_TRACKS],
     monitor: [bool; NUM_TRACKS],
     fader_db: [f32; NUM_TRACKS],
     pan: [f32; NUM_TRACKS],
     master_db: f32,
+    bus_fader_db: f32,
+    bus_muted: bool,
     track_level_db: [f32; NUM_TRACKS],
     master_level_db: (f32, f32),
 }
@@ -108,11 +111,14 @@ impl LiveState {
             transport_state: snap.transport_state,
             playhead: snap.playhead,
             armed: snap.armed,
+            bus_armed: snap.bus_armed,
             muted: snap.muted,
             monitor: snap.monitor,
             fader_db: snap.fader_db,
             pan: snap.pan,
             master_db: snap.master_db,
+            bus_fader_db: snap.bus_fader_db,
+            bus_muted: snap.bus_muted,
             track_level_db: snap.track_level_db,
             master_level_db: snap.master_level_db,
         }
@@ -126,6 +132,9 @@ struct Snapshot {
     transport_state: TransportState,
     playhead: usize,
     armed: [bool; NUM_TRACKS],
+    bus_armed: bool,
+    bus_fader_db: f32,
+    bus_muted: bool,
     muted: [bool; NUM_TRACKS],
     monitor: [bool; NUM_TRACKS],
     fader_db: [f32; NUM_TRACKS],
@@ -156,6 +165,12 @@ impl Backend {
                     Command::Fader { track, db } => live.fader_db[track] = db,
                     Command::Pan { track, value } => live.pan[track] = value,
                     Command::Master { db } => live.master_db = db,
+                    Command::BounceFader { db } => live.bus_fader_db = db,
+                    Command::BounceMute { on } => live.bus_muted = on,
+                    // Arm state is NOT mirrored optimistically: the
+                    // engine clears the other side of the mutual
+                    // exclusion itself (REQ-405), so the authoritative
+                    // value comes back via EngineEvent::Arming.
                     _ => {}
                 }
                 let _ = live.session.send(cmd);
@@ -181,6 +196,10 @@ impl Backend {
             for event in live.session.poll() {
                 match event {
                     EngineEvent::State(s) => live.transport_state = s,
+                    EngineEvent::Arming { tracks, bus } => {
+                        live.armed = tracks;
+                        live.bus_armed = bus;
+                    }
                     EngineEvent::Playhead { sample } => live.playhead = sample,
                     EngineEvent::Levels { tracks, master } => {
                         live.track_level_db = tracks;
@@ -202,6 +221,9 @@ impl Backend {
                 transport_state: engine.state(),
                 playhead: engine.playhead(),
                 armed: std::array::from_fn(|t| engine.is_armed(t)),
+                bus_armed: engine.is_bus_armed(),
+                bus_fader_db: engine.bus_fader_db(),
+                bus_muted: engine.is_bus_muted(),
                 muted: std::array::from_fn(|t| engine.is_muted(t)),
                 monitor: std::array::from_fn(|t| engine.is_monitor(t)),
                 fader_db: std::array::from_fn(|t| engine.fader_db(t)),
@@ -218,6 +240,9 @@ impl Backend {
                 transport_state: live.transport_state,
                 playhead: live.playhead,
                 armed: live.armed,
+                bus_armed: live.bus_armed,
+                bus_fader_db: live.bus_fader_db,
+                bus_muted: live.bus_muted,
                 muted: live.muted,
                 monitor: live.monitor,
                 fader_db: live.fader_db,
@@ -545,6 +570,31 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
     {
         let backend = Rc::clone(&backend);
         let ui_weak = ui.as_weak();
+        ui.on_bus_fader_changed(move |db| {
+            let mut slot = backend.borrow_mut();
+            let b = slot.as_mut().expect("backend always present between ticks");
+            b.send(Command::BounceFader { db });
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh(&ui, &b.snapshot());
+            }
+        });
+    }
+    {
+        let backend = Rc::clone(&backend);
+        let ui_weak = ui.as_weak();
+        ui.on_bus_mute_pressed(move || {
+            let mut slot = backend.borrow_mut();
+            let b = slot.as_mut().expect("backend always present between ticks");
+            let on = !b.snapshot().bus_muted;
+            b.send(Command::BounceMute { on });
+            if let Some(ui) = ui_weak.upgrade() {
+                refresh(&ui, &b.snapshot());
+            }
+        });
+    }
+    {
+        let backend = Rc::clone(&backend);
+        let ui_weak = ui.as_weak();
         ui.on_save_pressed(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
@@ -581,17 +631,22 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
             };
-            // A bounce is no longer a blocking batch command: it is
-            // arming the bus and pressing Record, and it rolls in real
-            // time so faders/pans can be ridden while it prints
-            // (REQ-401/404). Minimal wiring for now - the bus's own
-            // fader/mute strip and a proper transport-aware button are
-            // M7.15.
+            // A bounce is not a blocking batch command: it is arming
+            // the bus and pressing Record, and it rolls in real time so
+            // faders and pans can be ridden while it prints
+            // (REQ-401/404). The button toggles, so the same control
+            // starts and stops it rather than needing Stop to be found
+            // separately.
             let mut slot = backend.borrow_mut();
-            let backend_mut = slot.as_mut().expect("backend always present between ticks");
-            backend_mut.send(Command::BounceArm { on: true });
-            backend_mut.send(Command::Record);
-            ui.set_status_text("bouncing - press Stop when done".into());
+            let b = slot.as_mut().expect("backend always present between ticks");
+            if b.snapshot().bus_armed {
+                b.send(Command::Stop);
+                ui.set_status_text("bounce printed to the bus".into());
+            } else {
+                b.send(Command::BounceArm { on: true });
+                b.send(Command::Record);
+                ui.set_status_text("bouncing - press Bounce again to stop".into());
+            }
             refresh(&ui, &slot.as_ref().unwrap().snapshot());
         });
     }
@@ -1180,6 +1235,9 @@ fn refresh(ui: &MainWindow, snap: &Snapshot) {
     );
 
     ui.set_master_fader_db(snap.master_db);
+    ui.set_bus_fader_db(snap.bus_fader_db);
+    ui.set_bus_muted(snap.bus_muted);
+    ui.set_bus_armed(snap.bus_armed);
     ui.set_master_meter_l_fraction(meter_fraction(snap.master_level_db.0));
     ui.set_master_meter_r_fraction(meter_fraction(snap.master_level_db.1));
 

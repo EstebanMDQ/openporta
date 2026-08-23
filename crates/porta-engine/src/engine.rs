@@ -230,6 +230,14 @@ impl Engine {
         self.mixer.master_db()
     }
 
+    pub fn bus_fader_db(&self) -> f32 {
+        self.mixer.bus_fader_db()
+    }
+
+    pub fn is_bus_muted(&self) -> bool {
+        self.mixer.is_bus_muted()
+    }
+
     /// Post-fader peak of `track` from the most recently mixed block,
     /// in dBFS. For a UI meter; see Mixer::track_level_db.
     pub fn track_level_db(&self, track: usize) -> f32 {

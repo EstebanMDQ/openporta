@@ -104,6 +104,14 @@ pub enum EngineEvent {
         tracks: [f32; NUM_TRACKS],
         master: (f32, f32),
     },
+    /// Arm state, echoed back because the ENGINE can change it on its
+    /// own: arming the bounce bus clears every track's arm and vice
+    /// versa (REQ-405). A UI that only tracked its own sent commands
+    /// would show a track still armed after a bounce cleared it.
+    Arming {
+        tracks: [bool; NUM_TRACKS],
+        bus: bool,
+    },
     /// The audio callback missed its deadline; the count is cumulative.
     Xrun {
         total: u64,

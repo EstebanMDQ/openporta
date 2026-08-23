@@ -1412,7 +1412,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       allocations, producing numbers that looked exactly like real
       bugs. Every test now holds a file-wide mutex for its whole body,
       setup included. Full gate green.
-- [ ] M7.15 porta-app UI: Bounce button becomes bus-arm + Record
+- [x] M7.15 porta-app UI: Bounce button becomes bus-arm + Record
       through the live command queue (no blocking call), with REQ-405's
       engine-side auto-clear reflected in the UI - either echo arm
       changes back via an EngineEvent that LiveState.armed mirrors, or
@@ -1425,3 +1425,18 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       with no scrollbar, Bounce click-through arms and prints the
       bus, bus fader/mute audibly apply during playback and while
       bouncing)
+      Done 2026-08-23. Took the ECHO option for REQ-405, not the
+      accept-a-stale-display one: a new EngineEvent::Arming carries the
+      full arm state plus the bus flag, pushed by the realtime callback
+      only when it changes (same shape as the existing State event), and
+      LiveState mirrors it. Backend::send deliberately does NOT update
+      arm state optimistically the way it does faders - the engine is a
+      second writer here, which is exactly what the proposal flagged.
+      The Bounce button now toggles (arm+Record, then Stop) and reads
+      "BOUNCING" in red while a pass is open, so the same control
+      starts and ends it. New Bus strip between the tracks and the
+      master, where it sits in the signal path: fader + mute, no pan
+      (already stereo), no arm/monitor - 92px rather than a track
+      strip's 116px, which is also what keeps the row inside 800px
+      (4x116 + 92 + 116 + spacing = 722px). Gate green across all four
+      feature combinations.

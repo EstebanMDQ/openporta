@@ -707,6 +707,12 @@ pub fn start(
     let mut mix_l = vec![0.0f32; MAX_PERIOD];
     let mut mix_r = vec![0.0f32; MAX_PERIOD];
     let mut last_state = engine.state();
+    // Mirrored back to the UI on change: the engine clears arms on its
+    // own (REQ-405), so this is not derivable from sent commands.
+    let mut last_arming: ([bool; NUM_TRACKS], bool) = (
+        std::array::from_fn(|t| engine.is_armed(t)),
+        engine.is_bus_armed(),
+    );
     let mut engine_slot = Some(engine);
     let counters = Arc::clone(&xruns);
 
@@ -793,6 +799,17 @@ pub fn start(
                     done += n;
                 }
 
+                let arming: ([bool; NUM_TRACKS], bool) = (
+                    std::array::from_fn(|t| engine.is_armed(t)),
+                    engine.is_bus_armed(),
+                );
+                if arming != last_arming {
+                    last_arming = arming;
+                    let _ = event_tx.push(EngineEvent::Arming {
+                        tracks: arming.0,
+                        bus: arming.1,
+                    });
+                }
                 if engine.state() != last_state {
                     last_state = engine.state();
                     let _ = event_tx.push(EngineEvent::State(last_state));

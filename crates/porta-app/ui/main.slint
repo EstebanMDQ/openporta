@@ -205,6 +205,9 @@ export component MainWindow inherits Window {
     callback rewind-pressed();
     callback fast-forward-pressed();
     callback master-fader-changed(float);
+    // The bounce bus (REQ-409): fader and mute, no pan.
+    callback bus-fader-changed(float);
+    callback bus-mute-pressed();
     callback save-pressed();
     callback undo-pressed();
     // Post-fader mono sum of tracks 1-3 onto track 4 (REQ-401) - a
@@ -230,6 +233,12 @@ export component MainWindow inherits Window {
     in property <float> playhead-samples: 0;
     in property <float> tape-len-samples: 1;
     in property <float> master-fader-db: 0;
+    in property <float> bus-fader-db: 0;
+    in property <bool> bus-muted: false;
+    /// True while a bounce pass is armed or running - the engine can
+    /// clear this on its own (REQ-405), so it is mirrored from the
+    /// engine rather than assumed from the last button press.
+    in property <bool> bus-armed: false;
     in property <float> master-meter-l-fraction: 0;
     in property <float> master-meter-r-fraction: 0;
     in property <bool> can-undo: false;
@@ -655,6 +664,49 @@ export component MainWindow inherits Window {
                     track2 := TrackStrip { track-label: "2"; }
                     track3 := TrackStrip { track-label: "3"; }
                     track4 := TrackStrip { track-label: "4"; }
+
+                    // The bounce bus, between the tracks and the master
+                    // because that is where it sits in the signal path.
+                    // Narrower than a track strip: it has no arm, no
+                    // monitor and no pan (it is already stereo), which
+                    // is also what keeps the row inside 800px.
+                    Rectangle {
+                        width: 92px;
+                        background: Palette.alternate-background;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: bus-armed ? #e05252 : Palette.border;
+
+                        VerticalLayout {
+                            padding: 4px;
+                            spacing: 3px;
+                            alignment: start;
+
+                            Text {
+                                text: bus-armed ? "BUS REC" : "Bus";
+                                horizontal-alignment: center;
+                                font-size: 12px;
+                                color: bus-armed ? #e05252 : Palette.foreground;
+                            }
+                            TactileButton {
+                                text: bus-muted ? "MUTED" : "mute";
+                                active: bus-muted;
+                                active-color: #e05252;
+                                clicked => { bus-mute-pressed(); }
+                            }
+                            HorizontalLayout {
+                                alignment: center;
+                                Slider {
+                                    orientation: vertical;
+                                    height: 90px;
+                                    minimum: -36;
+                                    maximum: 12;
+                                    value: bus-fader-db;
+                                    changed(v) => { bus-fader-changed(v); }
+                                }
+                            }
+                        }
+                    }
 
                     Rectangle {
                         width: 116px;
