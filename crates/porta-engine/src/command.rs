@@ -58,6 +58,23 @@ pub enum Command {
         track: usize,
         on: bool,
     },
+    /// Arm the stereo bounce bus (REQ-404). Mutually exclusive with
+    /// arming any track (REQ-405) - the engine enforces that, so a
+    /// caller never has to sequence disarms itself. Non-blocking: this
+    /// only flips a flag, exactly like `Arm`.
+    BounceArm {
+        on: bool,
+    },
+    /// The bus's own volume fader, independent of the tracks' (REQ-409).
+    BounceFader {
+        db: f32,
+    },
+    /// Mute the bus's contribution to the mix. Note this also excludes
+    /// its prior content from what a bounce prints, which is mute doing
+    /// exactly what mute does - see spec REQ-401/406.
+    BounceMute {
+        on: bool,
+    },
     Bounce,
     Undo,
     Redo,
@@ -123,6 +140,9 @@ pub fn apply(engine: &mut Engine, command: Command) -> Result<(), EngineError> {
         Command::Master { db } => engine.mixer().set_master_db(db),
         Command::Mute { track, on } => engine.mixer().set_muted(track, on),
         Command::Monitor { track, on } => engine.set_monitor(track, on),
+        Command::BounceArm { on } => engine.set_bus_armed(on),
+        Command::BounceFader { db } => engine.mixer().set_bus_fader_db(db),
+        Command::BounceMute { on } => engine.mixer().set_bus_muted(on),
         Command::Bounce => engine.bounce()?,
         Command::Undo => engine.undo()?,
         Command::Redo => engine.redo()?,

@@ -1170,7 +1170,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       on flush), and an evicted-while-pending bus entry returning its
       buffers to the bus reserve with every track's chunk reserve
       untouched. Full gate green, golden unaffected.
-- [ ] M7.6 porta-engine: bus arm/fader/mute state + non-blocking
+- [x] M7.6 porta-engine: bus arm/fader/mute state + non-blocking
       Command::BounceArm/BounceFader/BounceMute, REQ-405 mutual
       exclusion (arming the bus clears all 4 track arms and vice
       versa), and the bus summed into ordinary playback: tape readback

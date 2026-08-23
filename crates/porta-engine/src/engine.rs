@@ -10,7 +10,7 @@
 use crate::mixer::Mixer;
 use crate::project::{Manifest, Project, ProjectError};
 use crate::record::RecordPass;
-use crate::tape::Tape;
+use crate::tape::{BusChannel, Tape};
 use crate::transport::{Transport, TransportState};
 use crate::undo::{Journal, UndoError};
 use crate::NUM_TRACKS;
@@ -34,6 +34,10 @@ pub struct Engine {
     journal: Journal,
     project: Project,
     armed: [bool; NUM_TRACKS],
+    /// The bounce bus's arm-like flag (REQ-404) - separate from
+    /// `armed`, and mutually exclusive with it (REQ-405). Session
+    /// state, not persisted, exactly like the track arms.
+    bus_armed: bool,
     /// Whether an armed track's live input is audible while stopped or
     /// playing, not just while actually recording - see
     /// `Command::Monitor`.
@@ -45,6 +49,12 @@ pub struct Engine {
     // Per-track scratch: processed input (record path) and tape playback.
     processed: Vec<Vec<f32>>,
     playback: Vec<Vec<f32>>,
+    /// The bus's own playback slot (L/R), mirroring a track's
+    /// `playback`: whatever the bus is currently contributing to the
+    /// mix. Ordinary tape readback when no pass is open; during a
+    /// bounce it holds the freshly printed signal (REQ-408). Allocated
+    /// here, once, off the realtime thread.
+    bus_playback: (Vec<f32>, Vec<f32>),
 }
 
 impl Engine {
@@ -93,6 +103,7 @@ impl Engine {
             journal,
             project,
             armed: [false; NUM_TRACKS],
+            bus_armed: false,
             monitor: [false; NUM_TRACKS],
             passes: [const { None }; NUM_TRACKS],
             // Built for real here, off the realtime thread, so `record()`
@@ -106,6 +117,7 @@ impl Engine {
             pass_buffer_fallbacks: 0,
             processed: vec![vec![0.0; MAX_BLOCK]; NUM_TRACKS],
             playback: vec![vec![0.0; MAX_BLOCK]; NUM_TRACKS],
+            bus_playback: (vec![0.0; MAX_BLOCK], vec![0.0; MAX_BLOCK]),
         })
     }
 
@@ -129,12 +141,35 @@ impl Engine {
         &self.project.manifest
     }
 
+    /// Arm a track. Arming any track disarms the bounce bus (REQ-405):
+    /// a bounce pass and a live input pass never overlap, so there is
+    /// no simultaneous case to reason about anywhere downstream.
     pub fn set_armed(&mut self, track: usize, armed: bool) {
         self.armed[track] = armed;
+        if armed {
+            self.bus_armed = false;
+        }
     }
 
     pub fn is_armed(&self, track: usize) -> bool {
         self.armed[track]
+    }
+
+    /// Arm the bounce bus (REQ-404). Arming it clears all four track
+    /// arms, the other half of REQ-405's mutual exclusion. A direct
+    /// consequence, stated so it isn't a surprise: no track's live
+    /// input can be monitored while the bus is armed, since
+    /// input-monitor preview requires an armed track. Intended - a
+    /// bounce is about the bus's printed signal, not a live source.
+    pub fn set_bus_armed(&mut self, armed: bool) {
+        self.bus_armed = armed;
+        if armed {
+            self.armed = [false; NUM_TRACKS];
+        }
+    }
+
+    pub fn is_bus_armed(&self) -> bool {
+        self.bus_armed
     }
 
     pub fn set_monitor(&mut self, track: usize, on: bool) {
@@ -366,9 +401,24 @@ impl Engine {
             }
         }
 
+        // The bus is part of the mix during ordinary playback too, not
+        // only while bouncing (REQ-401): read its stored content into
+        // its playback slot exactly as an idle track's is read. A
+        // bounce pass overwrites this slot with the printed signal
+        // instead (REQ-408) - that lands in M7.7.
+        self.tape
+            .read_bus(BusChannel::Left, pos, &mut self.bus_playback.0[..n]);
+        self.tape
+            .read_bus(BusChannel::Right, pos, &mut self.bus_playback.1[..n]);
+
         let views: [&[f32]; NUM_TRACKS] = std::array::from_fn(|t| &self.playback[t][..n]);
         self.mixer
-            .mix_block(&views, &mut out_l[..n], &mut out_r[..n]);
+            .sum_tracks(&views, &mut out_l[..n], &mut out_r[..n], None);
+        self.mixer.finish_mix(
+            &mut out_l[..n],
+            &mut out_r[..n],
+            Some((&self.bus_playback.0[..n], &self.bus_playback.1[..n])),
+        );
         self.transport.advance(n);
         if self.transport.is_stopped() {
             self.close_passes();
@@ -464,6 +514,99 @@ mod tests {
             fed = end;
         }
         left
+    }
+
+    #[test]
+    fn arming_the_bus_and_a_track_are_mutually_exclusive() {
+        // REQ-405, both directions.
+        let dir = TempDir::new("bus-arm-exclusion");
+        let mut e = Engine::create(&dir.0, 48_000, 1).unwrap();
+
+        e.set_armed(0, true);
+        e.set_armed(2, true);
+        e.set_bus_armed(true);
+        assert!(e.is_bus_armed());
+        for t in 0..NUM_TRACKS {
+            assert!(!e.is_armed(t), "arming the bus must clear track {t}");
+        }
+
+        e.set_armed(1, true);
+        assert!(!e.is_bus_armed(), "arming a track must clear the bus's arm");
+        assert!(e.is_armed(1));
+
+        // Disarming is not exclusion: it clears only what it names.
+        e.set_bus_armed(true);
+        e.set_bus_armed(false);
+        assert!(!e.is_bus_armed());
+        assert!(!e.is_armed(1), "still cleared by the earlier bus arm");
+    }
+
+    #[test]
+    fn bus_content_plays_back_at_its_own_fader_and_mute() {
+        // REQ-401/409: the bus is part of ordinary playback, not only
+        // audible while bouncing.
+        let dir = TempDir::new("bus-playback");
+        let mut e = Engine::create(&dir.0, 48_000, 1).unwrap();
+        let tone = sine(440.0, -6.0, 24_000);
+        let quantized: Vec<i16> = tone.iter().map(|&s| (s * 32767.0).round() as i16).collect();
+        e.tape.write_bus_raw(BusChannel::Left, 0, &quantized);
+        e.tape.write_bus_raw(BusChannel::Right, 0, &quantized);
+
+        let measure = |e: &mut Engine| {
+            e.seek(0);
+            e.play();
+            let out = run(e, 0, &silence(24_000), 512);
+            e.stop();
+            rms_dbfs(&out[4800..])
+        };
+
+        let unity = measure(&mut e);
+        assert!(unity > -20.0, "bus must be audible in playback: {unity:.1}");
+
+        e.mixer().set_bus_fader_db(-12.0);
+        let cut = measure(&mut e);
+        assert!(
+            (unity - cut - 12.0).abs() < 1.0,
+            "bus fader should cut ~12dB, got {:.1}",
+            unity - cut
+        );
+
+        e.mixer().set_bus_muted(true);
+        let muted = measure(&mut e);
+        assert!(muted < -100.0, "muted bus must be silent: {muted:.1}");
+    }
+
+    #[test]
+    fn bus_fader_and_mute_moves_do_not_click() {
+        // REQ-409's smoothing clause, through the real engine path.
+        let dir = TempDir::new("bus-ramp");
+        let mut e = Engine::create(&dir.0, 48_000, 1).unwrap();
+        let tone = sine(440.0, -6.0, 48_000);
+        let quantized: Vec<i16> = tone.iter().map(|&s| (s * 32767.0).round() as i16).collect();
+        e.tape.write_bus_raw(BusChannel::Left, 0, &quantized);
+        e.tape.write_bus_raw(BusChannel::Right, 0, &quantized);
+
+        e.seek(0);
+        e.play();
+        let quiet = silence(512);
+        let inputs: [&[f32]; NUM_TRACKS] = [&quiet, &quiet, &quiet, &quiet];
+        let mut out = Vec::new();
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        for block in 0..80 {
+            if block == 20 {
+                e.mixer().set_bus_fader_db(-24.0);
+            }
+            if block == 50 {
+                e.mixer().set_bus_muted(true);
+            }
+            let n = e.process_block(&inputs, &mut l, &mut r);
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&l[..n]);
+        }
+        e.stop();
+        porta_testkit::assert_no_clicks!(&out);
     }
 
     #[test]
