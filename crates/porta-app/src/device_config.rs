@@ -46,10 +46,15 @@ fn path() -> Option<PathBuf> {
 /// first-run setup step, so a fresh install has to behave exactly
 /// like reading an empty config.
 pub fn load() -> DeviceConfig {
-    path()
+    let mut config: DeviceConfig = path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Eager offset-to-map migration for every entry, so a later save
+    // can't drop an untouched entry's legacy wiring - see normalize's
+    // doc comment for the on-hardware bug this fixes.
+    config.normalize();
+    config
 }
 
 /// Record what actually worked for `input_device_name` and save

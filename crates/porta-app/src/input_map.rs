@@ -216,6 +216,23 @@ impl DeviceConfig {
     pub fn get(&self, input_device_name: &str) -> Option<&DeviceSettings> {
         self.devices.get(input_device_name)
     }
+
+    /// Migrate every offset-era entry to map form, eagerly, at load
+    /// time. Without this, re-saving the config (any successful
+    /// connect does) would silently drop the legacy offset of every
+    /// entry NOT being touched - `input_channel_offset` is never
+    /// serialized again, and an entry that was never re-connected has
+    /// no `input_channels` to write in its place, so its wiring would
+    /// read as offset 0 from then on. Found on the real Pi the first
+    /// time a migrated config was re-saved, not in review - the serde
+    /// round-trip tests all exercised one entry at a time.
+    pub fn normalize(&mut self) {
+        for settings in self.devices.values_mut() {
+            if settings.input_channels.is_none() {
+                settings.input_channels = Some(settings.input_map().to_vec());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -371,6 +388,37 @@ mod tests {
         let entry = reloaded.get("L6 Multichannel").unwrap();
         assert_eq!(entry.input_map(), [Some(2), Some(3), Some(4), Some(5)]);
         assert_eq!(entry.period, 256);
+    }
+
+    #[test]
+    fn resaving_a_config_keeps_untouched_entries_wiring() {
+        // Regression for a real bug found on the Pi, not in review: a
+        // connect re-saves the whole config, and an offset-era entry
+        // NOT being touched by that connect lost its wiring - the
+        // legacy field is never re-serialized and nothing had written a
+        // map in its place. normalize() (called by load) migrates every
+        // entry eagerly so a round trip preserves all of them.
+        let two_old_entries = r#"{
+            "last_input_device": "L6 Multichannel",
+            "devices": {
+                "L6 Multichannel": {"output_device": null, "period": 256, "input_channel_offset": 2},
+                "default_input":   {"output_device": null, "period": 256, "input_channel_offset": 2}
+            }
+        }"#;
+        let mut config: DeviceConfig = serde_json::from_str(two_old_entries).unwrap();
+        config.normalize();
+        // Simulate a connect touching only the L6 entry, then a save.
+        config.devices.insert(
+            "L6 Multichannel".to_string(),
+            DeviceSettings::new(None, 256, [Some(2), Some(3), Some(4), Some(5)]),
+        );
+        let json = serde_json::to_string(&config).unwrap();
+        let reloaded: DeviceConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            reloaded.get("default_input").unwrap().input_map(),
+            [Some(2), Some(3), Some(4), Some(5)],
+            "the untouched entry's offset wiring must survive the round trip"
+        );
     }
 
     #[test]
