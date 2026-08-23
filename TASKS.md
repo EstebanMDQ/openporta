@@ -736,7 +736,17 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       immediately followed by a normal "saved." - harmless, just noisy;
       worth quieting later, not blocking.
 - [ ] M6.2 Performance pass: 128-256 frame period, callback-time
-      instrumentation (verify: measured headroom documented in repo)
+      instrumentation (verify: measured headroom documented in repo).
+      Extended for the stereo bounce buss (REQ-905, openspec/changes/
+      001): the headroom measurement MUST include a bounce pass running
+      - two full per-channel character chains plus the shared
+      StereoFlutter in the same callback as ordinary playback - so this
+      part can only run after M7.7 lands. Stated fallback if it does
+      not fit at 128-256: raise the frame period before arming the
+      buss, as a deliberate per-bounce tradeoff (a period change tears
+      down the stream, so it can never adjust mid-pass); document the
+      chosen period alongside the measured numbers. [manual] on-device
+      measurement; the numbers land in docs/, not a cargo test.
 - [ ] M6.3 systemd/kiosk launch, microSD save-timing check, Pi setup README
       Kiosk auto-launch done 2026-08-21, requested directly:
       `deploy/openporta-kiosk.desktop`, a standard XDG autostart entry
@@ -961,3 +971,206 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       crates/porta-engine/tests/bounce.rs, and the handler's own shape
       is identical to Save/Undo/Export's, already proven live on this
       Pi. Full gate green across all four feature combinations.
+
+## M7 - Stereo bounce buss (openspec/changes/001, spec v1.1)
+
+Implements the approved stereo-bounce proposal: REQ-401/402 rewritten,
+REQ-404..409 new, REQ-603 deleted, REQ-502/602/702/801/904 amended
+(spec commit b5134b3). Dependency order below is load-bearing - each
+task assumes everything above it. The old Command::Bounce path stays
+alive and tested until M7.10 so the full gate is green at every commit.
+M6.2's headroom measurement gains a bounce clause that depends on M7.7
+(noted there).
+
+- [ ] M7.1 porta-dsp: split Flutter into FlutterModulator (wow osc +
+      flutter walk, emits a delay-in-samples value) + FlutterDelay
+      (ring buffer + Catmull-Rom read); Flutter becomes a thin
+      composition of one of each; add StereoFlutter (one modulator, two
+      delays, process(&mut self, l, r)). Depth-clamp constants
+      (.min(CENTRE - 4.0), .min(CENTRE / 4.0)) shared between Flutter
+      and StereoFlutter construction, not duplicated. AudioProcessor
+      stays mono/in-place. REQ-402, REQ-701/704 unchanged. (verify:
+      every existing flutter and generation-loss test passes
+      unmodified; StereoFlutter fed identical input on both channels
+      produces identical outputs - shared modulation, directly;
+      latency_samples unchanged)
+- [ ] M7.2 porta-dsp: split-chain builder on TapeCharacter - pre-
+      flutter Chain [Saturation, Hiss, Bandwidth], shared
+      StereoFlutter, post-flutter Chain ([Crush] if enabled, empty
+      otherwise), with a HISS_STAGE constant kept beside the builder
+      (the TapeCharacter::HISS_STAGE precedent) so builder and reseeder
+      cannot drift. StereoFlutter::reseed as an inherent method that
+      clears both rings + write indices and reseeds the modulator
+      (exactly the state Flutter::reset clears, across three objects);
+      the numbered per-pass sequence: reset both sub-chains,
+      reseed_stage(HISS_STAGE) on the pre-flutter chain only,
+      StereoFlutter::reseed. Modulator always seeds at channel term 0.
+      REQ-402/702. (verify: a reused, reset+reseeded split setup
+      renders identical output to freshly built ones with the same
+      seeds - the reseed_chain_matches_a_freshly_built_one property,
+      stereo; the empty post-flutter chain resets/processes safely)
+- [ ] M7.3 porta-engine: Tape gains the stereo bounce buss - an
+      explicit dedicated field (NOT an appended Tape.tracks element:
+      0..NUM_TRACKS loops would silently skip it), fixed cassette
+      length, 2 x i16, region read/write per channel, its own dirty-
+      chunk bitmap. REQ-101/401. (verify: buss roundtrip, bounds, and
+      dirty tracking; tracks 1-4 byte-identical across buss writes; no
+      track-indexed API can address the buss)
+- [ ] M7.4 porta-engine: Mixer::mix_block split into sum_tracks (ticks
+      each track's fader/pan ramps exactly once per sample; produces
+      the monitor sum gated by a new excluded-from-sum-but-still-
+      metered flag AND the ungated print sum from the same scaled
+      values; meters from input * fader_amp exactly as today) and
+      finish_mix (adds the buss playback pair at its own smoothed
+      fader/mute - no pan - then a separate master Smoothed ramp, then
+      the +/-1 clamp; only place out_l/out_r are written). REQ-406/408/
+      409 groundwork; REQ-602/203 preserved. (verify: track-only output
+      matches the pre-split mixer across block sizes 1/37/64/512;
+      master-fader jump produces no click - extend
+      fader_jump_does_not_click to master; an excluded track vanishes
+      from the monitor sum, stays full-weight in the print sum, and its
+      meter still reads; golden stays within its 3 LSB tolerance - if
+      the fp reordering exceeds it, re-bless here with a note and
+      notification, and M7.9's event then covers only the op change)
+- [ ] M7.5 porta-engine: journal stereo entry + buss reserve.
+      Entry.right_track: Option<usize> #[serde(default)] (None = every
+      existing single-channel entry; len stays per-channel);
+      Entry::bytes() doubles when right_track.is_some(); one payload
+      file per id, left channel's bytes then right's, back to back;
+      Journal::undo/redo run the read/write sequence for both channels,
+      succeeding or failing together. pending_writes entries gain an
+      explicit Track(usize)-vs-Buss tag (no overloaded bare index), and
+      the buss gets a double-buffered reserve - two full-tape-length
+      buffers per channel, allocated once at open/create, handed out
+      and reclaimed via mem::take, give-back routed by the tag.
+      REQ-502/503/505, REQ-902. (verify: stereo-entry undo/redo
+      restores both channels byte-equal with no reachable one-channel-
+      reverted state; a pre-existing journal JSON still loads; eviction
+      accounting counts a stereo entry at 2x; the reserve hands out
+      buffer A then B with zero allocation and a third take falls back)
+- [ ] M7.6 porta-engine: buss arm/fader/mute state + non-blocking
+      Command::BounceArm/BounceFader/BounceMute, REQ-405 mutual
+      exclusion (arming the buss clears all 4 track arms and vice
+      versa), and the buss summed into ordinary playback: tape readback
+      into its playback slot when no pass is open, through finish_mix.
+      REQ-404/405/409. (verify: mutual exclusion both directions; buss
+      content audible at its fader during plain playback and mute
+      silences it; fader/mute moves ride the 5ms ramp, no clicks)
+- [ ] M7.7 porta-engine: the realtime bounce pass in
+      Engine::process_block. record() with the buss armed engages a
+      stereo pass (REQ-301); print buffers, buss playback pair, and
+      the per-block gain scratch buffer are Engine-owned, allocated at
+      open/create; both split chains built unconditionally at open/
+      create and reset+reseeded per pass via M7.2's sequence; print
+      input = sum_tracks' print sum + the buss's prior content read
+      before write (REQ-407), scaled by the buss gain ticked once per
+      sample into the scratch buffer and reused post-chain (REQ-406
+      pre-master tap); per-channel hiss/dither seeds via
+      seed_for(noise_seed, pass, channel), L=0/R=1; post-chain W(t)
+      dithered/quantized through the double-buffered reserve and copied
+      to the buss playback slot while tracks 1-4 are excluded-but-
+      metered (REQ-408); punch crossfades per REQ-302 unchanged.
+      (verify: printed region equals tracks-at-live-fader/pan plus
+      folded-forward prior buss content, byte-identical across two
+      same-seed cassettes regardless of master position; tracks 1-4
+      byte-identical across a bounce and the buss byte-identical across
+      a track pass - REQ-306 both ways; one undo reverts both channels;
+      two back-to-back bounces with nothing saved keep
+      pass_buffer_fallbacks() == 0 and a third is allowed to fall back;
+      renders bit-reproducible)
+- [ ] M7.8 porta-engine: buss persistence - tape/bounce_l.raw +
+      bounce_r.raw written in the existing 5s dirty-chunk pattern;
+      Project::open/load_tape treat missing buss files as never-
+      bounced silence; Manifest gains bounce_fader_db: f32 +
+      bounce_muted: bool, both #[serde(default)], carried by
+      apply_to/capture_from. REQ-801/802, REQ-409. (verify: save/
+      reopen roundtrips buss audio byte-exact and fader/mute values;
+      a cassette saved before this feature opens with a silent buss at
+      unity/unmuted; only dirty buss chunks are written)
+- [ ] M7.9 porta-app script runner (+ fixtures): new ops Op::Mute
+      {track, on}, Op::BounceArm {on}, Op::BounceFader {db},
+      Op::BounceMute {on}, and Op::Bounce {seconds} (errors unless the
+      buss is armed; runs the transport like Op::Play); update the
+      three {"op":"bounce"} users - tests/golden.rs, tests/cli.rs,
+      auditions/m3-session.json - to the new shape; regenerate the
+      golden render via UPDATE_GOLDEN. This is the proposal's single
+      regeneration event: record the re-bless note here in TASKS.md in
+      the same commit and notify the owner. REQ-804. (verify: a script
+      drives arm/fader/mute/bounce headlessly end to end; golden
+      passes against the regenerated reference; cli suite green)
+- [ ] M7.10 porta-engine + porta-app: delete the old bounce -
+      Command::Bounce and its is_blocking() arm, Engine::bounce(), the
+      disk_touching_commands_are_marked_blocking assertion about it;
+      rewrite crates/porta-engine/tests/bounce.rs wholesale to the new
+      semantics (every listed test:
+      bounce_sums_the_source_tracks_onto_track_four,
+      bounce_respects_faders_and_ignores_pans (REQ-603 is deleted -
+      pans are now honored), bounce_excludes_muted_tracks,
+      bounce_is_undoable, bounce_applies_the_character_again,
+      bounce_is_refused_while_rolling, bounce_is_reproducible,
+      bounce_leaves_the_source_tracks_alone); swap ui.rs's
+      on_bounce_pressed to buss-arm + Record so --features ui still
+      builds (minimal - the full UI surface is M7.14); append a
+      superseded-by-M7 note to M3.1's entry, whose verify text
+      describes the deleted semantics. (verify: rewritten bounce.rs
+      suite green - stereo sum honors faders and pans, sources
+      untouched, fold-forward, undo byte-exact, character compounds,
+      refused while a track pass is open (REQ-405), reproducible; no
+      reference to the deleted paths remains; gate green across all
+      four feature combinations)
+- [ ] M7.11 porta-engine: generation_loss.rs REQ-403 rewrite, in
+      place - prime (bounce once with tracks 1-4 unmuted), then mute
+      all four and bounce three more times, measuring generations
+      2/3/4 (buss re-printing only its own prior content, identical
+      input conditions per generation). (verify: monotonic 8kHz-band
+      decay and monotonic noise-floor rise across gens 2-4,
+      reproducible, tolerating a few hundred samples of the accepted
+      per-generation latency drift - no exact-alignment assertion)
+- [ ] M7.12 porta-engine acceptance tests (+ a Pearson correlation
+      helper in porta-testkit beside band_energy_db, not inline in a
+      test): stereo image - hard-left source, bounce twice, right
+      channel's band energy in the source range stays >= 10dB below
+      the left's; hiss decorrelation - Pearson between the two
+      channels' hiss-only regions < 0.1 over a multi-second window
+      (REQ-702); master invariance - two fresh same-seed cassettes,
+      identical op sequences differing only in Op::Master before the
+      bounce, printed regions byte-identical (REQ-406); clamp
+      engagement - 5 generations of 0dBFS material produce a sustained
+      flat-top plateau of consecutive extreme samples (not a lone
+      boundary sample), then pin a regression bound from the measured
+      clip fraction, not a guessed one. (verify: the four named
+      numeric assertions above)
+- [ ] M7.13 porta-engine REQ-408 monitoring tests, two separate tests:
+      (a) dither-bound - prime the buss with a real first bounce, mute
+      tracks 1-4, set a settled -6dB buss fader via BounceFader, run a
+      measured pass lying entirely inside the primed region and ending
+      short of the tape end; capture the live monitor output over the
+      middle stretch clear of both XFADE_SAMPLES windows, replay the
+      same tape region after the pass closes, and assert RMS of the
+      per-sample difference < ~0.25 LSB (the dither bound at -6dB) -
+      an RMS assertion, not per-sample tolerance; (b) metering -
+      tracks 1-4 unmuted and carrying signal, buss muted, pass open:
+      each track_level_db reads above the meter floor while the
+      block's audible output is exactly silent. (verify: the two
+      assertions as stated)
+- [ ] M7.14 porta-engine: allocator-counting harness - a test-only
+      counting global allocator asserting zero alloc/dealloc on the
+      simulated realtime path across record(), process_block(), and
+      stop(), for both an ordinary track pass and an open bounce pass.
+      Makes REQ-902 load-bearing instead of inferred; independent of
+      the buss but must cover it. (verify: counts are zero across
+      those calls in both scenarios, and the harness fails when an
+      allocation is deliberately injected)
+- [ ] M7.15 porta-app UI: Bounce button becomes buss-arm + Record
+      through the live command queue (no blocking call), with REQ-405's
+      engine-side auto-clear reflected in the UI - either echo arm
+      changes back via an EngineEvent that LiveState.armed mirrors, or
+      document accepting a stale display until the next resync (a
+      decision to make here, flagged in the proposal); add a buss
+      fader/mute strip (fader + mute, no pan, REQ-409). Must still fit
+      the 800x480 kiosk layout without scrolling. (verify: new pure
+      logic under cargo test --features ui; gate green across all four
+      feature combinations; [manual] Pi checklist: layout fits 800x480
+      with no scrollbar, Bounce click-through arms and prints the
+      buss, buss fader/mute audibly apply during playback and while
+      bouncing)
