@@ -207,6 +207,10 @@ export component MainWindow inherits Window {
     callback master-fader-changed(float);
     callback save-pressed();
     callback undo-pressed();
+    // Post-fader mono sum of tracks 1-3 onto track 4 (REQ-401) - a
+    // blocking, stop-gated operation like Save/Undo, not a live Command,
+    // so it's wired the same way they are.
+    callback bounce-pressed();
     callback export-pressed();
     callback export-mp3-pressed();
     callback new-pressed();
@@ -677,6 +681,10 @@ export component MainWindow inherits Window {
                         text: "Undo";
                         enabled: can-undo;
                         clicked => { undo-pressed(); }
+                    }
+                    TactileButton {
+                        text: "Bounce";
+                        clicked => { bounce-pressed(); }
                     }
                     Text {
                         text: status-text;

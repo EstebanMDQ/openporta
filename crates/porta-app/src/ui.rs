@@ -578,6 +578,22 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
     {
         let backend = Rc::clone(&backend);
         let ui_weak = ui.as_weak();
+        ui.on_bounce_pressed(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let path = ui.get_cassette_path().to_string();
+            let mut slot = backend.borrow_mut();
+            let status = with_engine(&mut slot, &path, |engine| {
+                status_message("bounce", engine.bounce())
+            });
+            ui.set_status_text(status.into());
+            refresh(&ui, &slot.as_ref().unwrap().snapshot());
+        });
+    }
+    {
+        let backend = Rc::clone(&backend);
+        let ui_weak = ui.as_weak();
         ui.on_export_pressed(move || {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
