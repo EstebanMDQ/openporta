@@ -1,10 +1,10 @@
-//! Remembers which period/channel-offset worked for a given input
-//! device, so `--in-offset`/`--period` (or the UI's equivalent fields)
+//! Remembers which period/input-channel-map worked for a given input
+//! device, so `--in-map`/`--period` (or the UI's equivalent fields)
 //! don't have to be retyped every launch (M6.1). Keyed by the input
 //! device's resolved name, not written into any cassette: an
 //! interface's channel wiring is a property of the physical setup, not
 //! of any one project, and different interfaces need different
-//! offsets (a Zoom L6 and a PreSonus Quantum 2626 don't wire their
+//! wiring (a Zoom L6 and a PreSonus Quantum 2626 don't wire their
 //! inputs the same way).
 //!
 //! Also remembers the *name itself* of the last input device that
@@ -17,13 +17,16 @@
 //! 12-channel interface like the L6. Substituting the remembered name
 //! sidesteps that pseudo-device entirely.
 //!
-//! Deliberately just an offset, not a full per-track channel
-//! assignment - every device this has actually been run against wants
-//! a contiguous block starting somewhere, and a free-form assignment
-//! UI is real added complexity (more CLI surface, more UI surface, a
-//! capture-wiring rewrite in realtime.rs) with no confirmed use case
-//! yet. If a real interface ever needs non-contiguous channels, this
-//! is an additive change to one `DeviceSettings` entry, not a rewrite.
+//! History note: this started as a single contiguous channel *offset*,
+//! deliberately not a per-track assignment ("no confirmed use case
+//! yet... an additive change to one `DeviceSettings` entry, not a
+//! rewrite" - the original comment here). The confirmed use case
+//! arrived (change 002, owner-requested per-track selection) and took
+//! exactly that additive path: `DeviceSettings` now stores a per-track
+//! map, and offset-era files migrate on load (see `input_map.rs`,
+//! where the serde types and the migration rule now live so their
+//! tests run in the ungated CI gate - this module keeps only the file
+//! I/O).
 //!
 //! There's no separate "save settings" action anywhere: a successful
 //! `connect()`/`live` startup remembers whatever it just used,
@@ -31,172 +34,46 @@
 //! (REQ-902 - this is plain synchronous file I/O, never called from
 //! an audio callback).
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use crate::input_map::{DeviceConfig, DeviceSettings, InputMap};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DeviceSettings {
-    pub output_device: Option<String>,
-    pub period: usize,
-    pub input_channel_offset: usize,
+fn path() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?).join(".config/openporta/audio.json"))
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DeviceConfig {
-    #[serde(default)]
-    last_input_device: Option<String>,
-    #[serde(default)]
-    devices: HashMap<String, DeviceSettings>,
+/// Missing file, unreadable file, or unparseable JSON all read as
+/// "nothing remembered yet" rather than an error - there's no
+/// first-run setup step, so a fresh install has to behave exactly
+/// like reading an empty config.
+pub fn load() -> DeviceConfig {
+    path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
-impl DeviceConfig {
-    #[cfg_attr(not(feature = "realtime"), allow(dead_code))]
-    fn path() -> Option<PathBuf> {
-        Some(PathBuf::from(std::env::var_os("HOME")?).join(".config/openporta/audio.json"))
-    }
-
-    /// Missing file, unreadable file, or unparseable JSON all read as
-    /// "nothing remembered yet" rather than an error - there's no
-    /// first-run setup step, so a fresh install has to behave exactly
-    /// like reading an empty config.
-    pub fn load() -> Self {
-        Self::path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
-
-    /// What to substitute for a blank `--in`/input field - see the
-    /// module doc comment for why that can't just be left blank.
-    pub fn last_input_device(&self) -> Option<&str> {
-        self.last_input_device.as_deref()
-    }
-
-    pub fn get(&self, input_device_name: &str) -> Option<&DeviceSettings> {
-        self.devices.get(input_device_name)
-    }
-
-    /// Record what actually worked for `input_device_name` and save
-    /// immediately. Best-effort: a write failure (e.g. no `$HOME`, a
-    /// read-only filesystem) just means nothing gets remembered this
-    /// time, not a reason to fail the connection that already
-    /// succeeded.
-    #[cfg_attr(not(feature = "realtime"), allow(dead_code))]
-    pub fn remember(
-        input_device_name: &str,
-        output_device: &str,
-        period: usize,
-        input_channel_offset: usize,
-    ) {
-        let mut config = Self::load();
-        config.last_input_device = Some(input_device_name.to_string());
-        config.devices.insert(
-            input_device_name.to_string(),
-            DeviceSettings {
-                output_device: Some(output_device.to_string()),
-                period,
-                input_channel_offset,
-            },
-        );
-        config.save();
-    }
-
-    fn save(&self) {
-        let Some(path) = Self::path() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
-        }
-    }
+/// Record what actually worked for `input_device_name` and save
+/// immediately. Best-effort: a write failure (e.g. no `$HOME`, a
+/// read-only filesystem) just means nothing gets remembered this
+/// time, not a reason to fail the connection that already succeeded.
+pub fn remember(input_device_name: &str, output_device: &str, period: usize, map: InputMap) {
+    let mut config = load();
+    config.last_input_device = Some(input_device_name.to_string());
+    config.devices.insert(
+        input_device_name.to_string(),
+        DeviceSettings::new(Some(output_device.to_string()), period, map),
+    );
+    save(&config);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_or_unparseable_config_reads_as_empty() {
-        let config = DeviceConfig::default();
-        assert!(config.get("L6 Multichannel").is_none());
-        assert!(config.last_input_device().is_none());
-        let garbage: Result<DeviceConfig, _> = serde_json::from_str("not json");
-        assert!(garbage.is_err());
+fn save(config: &DeviceConfig) {
+    let Some(path) = path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
-
-    #[test]
-    fn round_trips_through_json() {
-        let mut config = DeviceConfig {
-            last_input_device: Some("L6 Multichannel".to_string()),
-            ..Default::default()
-        };
-        config.devices.insert(
-            "L6 Multichannel".to_string(),
-            DeviceSettings {
-                output_device: Some("L6 Analog Surround 4.0".to_string()),
-                period: 256,
-                input_channel_offset: 2,
-            },
-        );
-        let json = serde_json::to_string(&config).unwrap();
-        let reloaded: DeviceConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(reloaded.last_input_device(), Some("L6 Multichannel"));
-        let entry = reloaded.get("L6 Multichannel").unwrap();
-        assert_eq!(entry.input_channel_offset, 2);
-        assert_eq!(entry.period, 256);
-        assert_eq!(
-            entry.output_device.as_deref(),
-            Some("L6 Analog Surround 4.0")
-        );
-    }
-
-    #[test]
-    fn different_devices_keep_independent_settings() {
-        let mut config = DeviceConfig::default();
-        config.devices.insert(
-            "L6 Multichannel".to_string(),
-            DeviceSettings {
-                output_device: None,
-                period: 256,
-                input_channel_offset: 2,
-            },
-        );
-        config.devices.insert(
-            "Quantum 2626".to_string(),
-            DeviceSettings {
-                output_device: None,
-                period: 128,
-                input_channel_offset: 0,
-            },
-        );
-        assert_eq!(
-            config.get("L6 Multichannel").unwrap().input_channel_offset,
-            2
-        );
-        assert_eq!(config.get("Quantum 2626").unwrap().input_channel_offset, 0);
-    }
-
-    /// The bug this whole last_input_device field exists to route
-    /// around: a blank field can't be trusted to resolve back to the
-    /// same device a name-based remember() call used as its key.
-    #[test]
-    fn remembers_which_device_name_to_substitute_for_a_blank_field() {
-        let config = DeviceConfig {
-            last_input_device: Some("L6 Multichannel".to_string()),
-            devices: HashMap::from([(
-                "L6 Multichannel".to_string(),
-                DeviceSettings {
-                    output_device: Some("L6 Analog Surround 4.0".to_string()),
-                    period: 256,
-                    input_channel_offset: 2,
-                },
-            )]),
-        };
-        let effective_name = config.last_input_device().unwrap();
-        assert_eq!(config.get(effective_name).unwrap().input_channel_offset, 2);
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = std::fs::write(path, json);
     }
 }

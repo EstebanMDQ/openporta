@@ -22,6 +22,7 @@
 //! the ring absorbs the drift: an empty ring reads as silence and a full
 //! one drops, both counted as xruns rather than papered over.
 
+use crate::input_map::{plan_routing, InputMap};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, StreamConfig};
 use porta_engine::command::{Command, EngineEvent};
@@ -426,12 +427,11 @@ pub struct RealtimeSession {
     pub period: usize,
     pub input_device: Option<String>,
     pub output_device: String,
-    /// How many tracks actually have a distinct input channel wired up
-    /// (0 with no input device, otherwise up to NUM_TRACKS - fewer if
-    /// the device doesn't have channel_offset + NUM_TRACKS channels).
-    /// Tracks beyond this record silence rather than a duplicate signal.
-    pub input_tracks: usize,
-    pub input_channel_offset: usize,
+    /// The resolved, connect-time-validated per-track map (REQ-907):
+    /// which device channel feeds each track, `None` where nothing does
+    /// (unassigned, or assigned beyond the device's channels). What the
+    /// status surfaces report (REQ-908) and what `remember()` persists.
+    pub input_map: InputMap,
 }
 
 impl RealtimeSession {
@@ -498,14 +498,20 @@ struct Negotiated {
     engine_handoff_control: HandoffControlSide<Engine>,
     input_stream: Option<cpal::Stream>,
     input_name_used: Option<String>,
-    track_capture_rx: Vec<Consumer<f32>>,
+    /// Track-indexed (always NUM_TRACKS long), NOT a positional prefix:
+    /// `None` for a track with no valid input channel. A review of
+    /// change 002 caught that a positional Vec would misroute a sparse
+    /// map (track 3's ring landing on track 2).
+    track_capture_rx: Vec<Option<Consumer<f32>>>,
+    /// The validated per-track routing actually in effect.
+    resolved_map: InputMap,
 }
 
 fn negotiate(
     input_name: Option<&str>,
     output_name: Option<&str>,
     period: Option<usize>,
-    channel_offset: usize,
+    map: &InputMap,
 ) -> Result<Negotiated, RealtimeError> {
     let host = cpal::default_host();
     let output = pick_named_or_default(host.output_devices()?, output_name, || {
@@ -540,34 +546,72 @@ fn negotiate(
         rx: engine_rx,
     };
 
-    // Optional capture stream: one ring per track, fed from a distinct
-    // device channel starting at channel_offset. Tracks beyond however
-    // many channels the device actually has get no ring at all and
-    // record silence rather than a duplicate of another track's input.
+    // Optional capture stream: one ring per assigned track, each fed
+    // from its mapped device channel (REQ-907). Tracks with no valid
+    // assignment (unassigned, or mapped beyond the device's channels)
+    // get no ring at all and record silence rather than a duplicate of
+    // another track's input.
     let input_device = pick_named_or_default(host.input_devices()?, input_name, || {
         host.default_input_device()
     })?;
-    let (input_stream, input_name_used, track_capture_rx) = match input_device {
-        None => (None, None, Vec::new()),
+    let no_input = || {
+        (
+            None,
+            None,
+            (0..NUM_TRACKS).map(|_| None).collect::<Vec<_>>(),
+            [None; NUM_TRACKS],
+        )
+    };
+    let (input_stream, input_name_used, track_capture_rx, resolved_map) = match input_device {
+        None => no_input(),
         Some(device) => {
             let name = device.to_string();
             let max_channels = max_input_channels(&device)?;
-            let wanted = (channel_offset as u16).saturating_add(NUM_TRACKS as u16);
-            let total_channels = max_channels.min(wanted).max(1);
-            let active_tracks = (total_channels as usize)
-                .saturating_sub(channel_offset)
-                .min(NUM_TRACKS);
+            let plan = plan_routing(map, max_channels as usize);
+            let Some(request_channels) = plan.request_channels else {
+                // Nothing assigned at all: open no input stream, same
+                // as having no input device (change 002, pinned - this
+                // also means remember() never persists an all-silent
+                // map, since input_name_used stays None).
+                return Ok(Negotiated {
+                    output,
+                    out_config,
+                    out_channels,
+                    output_device,
+                    period,
+                    command_tx,
+                    command_rx,
+                    event_tx,
+                    event_rx,
+                    xruns,
+                    engine_handoff_audio,
+                    engine_handoff_control,
+                    input_stream: None,
+                    input_name_used: None,
+                    track_capture_rx: (0..NUM_TRACKS).map(|_| None).collect(),
+                    resolved_map: [None; NUM_TRACKS],
+                });
+            };
+            let total_channels = (request_channels as u16).max(1);
             let in_config = StreamConfig {
                 channels: total_channels,
                 sample_rate: porta_engine::SAMPLE_RATE,
                 buffer_size: BufferSize::Fixed(period as u32),
             };
-            let mut capture_tx = Vec::with_capacity(active_tracks);
-            let mut capture_rx = Vec::with_capacity(active_tracks);
-            for _ in 0..active_tracks {
-                let (tx, rx) = RingBuffer::<f32>::new(INPUT_RING);
-                capture_tx.push(tx);
-                capture_rx.push(rx);
+            // Producer side pairs each ring with its source channel;
+            // consumer side stays track-indexed so a sparse map can't
+            // shift a ring onto the wrong track.
+            let mut capture_tx: Vec<(usize, Producer<f32>)> = Vec::with_capacity(NUM_TRACKS);
+            let mut capture_rx: Vec<Option<Consumer<f32>>> = Vec::with_capacity(NUM_TRACKS);
+            for t in 0..NUM_TRACKS {
+                match plan.per_track[t] {
+                    Some(ch) => {
+                        let (tx, rx) = RingBuffer::<f32>::new(INPUT_RING);
+                        capture_tx.push((ch, tx));
+                        capture_rx.push(Some(rx));
+                    }
+                    None => capture_rx.push(None),
+                }
             }
             let counters = Arc::clone(&xruns);
             let frame_stride = total_channels as usize;
@@ -575,8 +619,8 @@ fn negotiate(
                 in_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     for frame in data.chunks_exact(frame_stride) {
-                        for (t, tx) in capture_tx.iter_mut().enumerate() {
-                            if tx.push(frame[channel_offset + t]).is_err() {
+                        for (ch, tx) in capture_tx.iter_mut() {
+                            if tx.push(frame[*ch]).is_err() {
                                 counters.dropped.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -586,7 +630,7 @@ fn negotiate(
                 None,
             )?;
             stream.play()?;
-            (Some(stream), Some(name), capture_rx)
+            (Some(stream), Some(name), capture_rx, plan.per_track)
         }
     };
 
@@ -606,16 +650,18 @@ fn negotiate(
         input_stream,
         input_name_used,
         track_capture_rx,
+        resolved_map,
     })
 }
 
 /// Start playback (and capture, if an input device is available).
 /// `input_name`/`output_name` are substring matches against device
 /// names; `None` means the system default. `period` is a hint - the
-/// device decides, and some hosts ignore it entirely. `channel_offset`
-/// skips that many leading input channels before assigning the rest to
-/// tracks 1..NUM_TRACKS in order - e.g. 2 on a Zoom L6, whose channels 1
-/// and 2 carry its own main mix rather than a per-track send.
+/// device decides, and some hosts ignore it entirely. `map` assigns a
+/// device input channel (0-based here; the parse boundary is 1-based)
+/// to each track - e.g. channels 2..5 on a Zoom L6, whose channels 0
+/// and 1 carry its own main mix rather than a per-track send (REQ-907;
+/// see `input_map.rs`).
 ///
 /// On failure `engine` comes back with the error rather than being
 /// dropped, so a failed connect attempt from a UI never silently loses
@@ -631,7 +677,7 @@ pub fn start(
     input_name: Option<&str>,
     output_name: Option<&str>,
     period: Option<usize>,
-    channel_offset: usize,
+    map: &InputMap,
 ) -> Result<RealtimeSession, StartError> {
     let Negotiated {
         output,
@@ -649,11 +695,11 @@ pub fn start(
         input_stream,
         input_name_used,
         mut track_capture_rx,
-    } = match negotiate(input_name, output_name, period, channel_offset) {
+        resolved_map,
+    } = match negotiate(input_name, output_name, period, map) {
         Ok(n) => n,
         Err(e) => return Err(StartError::Negotiation(Box::new(engine), e)),
     };
-    let input_tracks = track_capture_rx.len();
 
     // Everything the output callback touches is allocated here, before
     // the stream starts (REQ-902).
@@ -686,20 +732,24 @@ pub fn start(
 
                 let mut starved = 0u64;
                 for (t, rx) in track_capture_rx.iter_mut().enumerate() {
-                    for slot in captured[t][..frames].iter_mut() {
-                        match rx.pop() {
-                            Ok(s) => *slot = s,
-                            Err(_) => {
-                                *slot = 0.0;
-                                starved += 1;
+                    match rx {
+                        Some(rx) => {
+                            for slot in captured[t][..frames].iter_mut() {
+                                match rx.pop() {
+                                    Ok(s) => *slot = s,
+                                    Err(_) => {
+                                        *slot = 0.0;
+                                        starved += 1;
+                                    }
+                                }
                             }
                         }
+                        // No device channel wired to this track:
+                        // silence, not a duplicate of another track's
+                        // input. Per-track, not a tail fill - the map
+                        // can be sparse (REQ-907).
+                        None => captured[t][..frames].fill(0.0),
                     }
-                }
-                for row in captured[track_capture_rx.len()..].iter_mut() {
-                    // No device channel wired to this track: silence, not a
-                    // duplicate of another track's input.
-                    row[..frames].fill(0.0);
                 }
                 if starved > 0 {
                     counters.starved.fetch_add(starved, Ordering::Relaxed);
@@ -775,7 +825,6 @@ pub fn start(
         period,
         input_device: input_name_used,
         output_device,
-        input_tracks,
-        input_channel_offset: channel_offset,
+        input_map: resolved_map,
     })
 }

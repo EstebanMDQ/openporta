@@ -232,10 +232,15 @@ impl Backend {
                 // there wasn't anything.
                 can_undo: true,
                 connected: true,
+                // The persistent status line carries the per-track
+                // input channel list (REQ-908) - this string, refreshed
+                // every tick, not connect()'s transient message, which
+                // the next tick would wipe.
                 connection_status: format!(
-                    "connected: out {} / in {} (period {})",
+                    "connected: out {} / in {} {} (period {})",
                     live.session.output_device,
                     live.session.input_device.as_deref().unwrap_or("(none)"),
+                    crate::input_map::format_status_short(&live.session.input_map),
                     live.session.period,
                 ),
             },
@@ -284,7 +289,7 @@ fn with_engine(
             live.session.output_device.clone(),
             live.session.input_device.clone(),
             live.session.period,
-            live.session.input_channel_offset,
+            live.session.input_map,
         )),
         Backend::Silent(_) => None,
     };
@@ -292,14 +297,8 @@ fn with_engine(
     let status = f(&mut engine);
 
     #[cfg(feature = "realtime")]
-    if let Some((output, input, period, channel_offset)) = reconnect {
-        match crate::realtime::start(
-            engine,
-            input.as_deref(),
-            Some(&output),
-            Some(period),
-            channel_offset,
-        ) {
+    if let Some((output, input, period, map)) = reconnect {
+        match crate::realtime::start(engine, input.as_deref(), Some(&output), Some(period), &map) {
             Ok(session) => {
                 *slot = Some(Backend::Live(Box::new(LiveState::from_snapshot(
                     session, &snap,
@@ -331,12 +330,12 @@ fn connect(
     input: Option<&str>,
     output: Option<&str>,
     period: Option<usize>,
-    channel_offset: usize,
+    map: &crate::input_map::InputMap,
 ) -> String {
     let backend = slot.take().expect("backend always present between ticks");
     let snap = backend.snapshot();
     let engine = take_engine(backend, cassette_path);
-    match crate::realtime::start(engine, input, output, period, channel_offset) {
+    match crate::realtime::start(engine, input, output, period, map) {
         Ok(session) => {
             let status = format!(
                 "connected: out {} / in {}",
@@ -347,11 +346,11 @@ fn connect(
             // see connect_audio's startup pre-fill and device_config's
             // module doc comment.
             if let Some(name) = &session.input_device {
-                crate::device_config::DeviceConfig::remember(
+                crate::device_config::remember(
                     name,
                     &session.output_device,
                     session.period,
-                    session.input_channel_offset,
+                    session.input_map,
                 );
             }
             *slot = Some(Backend::Live(Box::new(LiveState::from_snapshot(
@@ -931,7 +930,7 @@ fn refresh_tapes_view(ui: &MainWindow) {
     ui.set_free_space_text(free_space_text(&path).into());
 }
 
-/// Pre-fills the input/output/period/offset fields from whatever
+/// Pre-fills the input/output/period/input-map fields from whatever
 /// connected successfully last time (M6.1). The input field itself
 /// gets filled in too, not left blank - cpal's own "default device"
 /// resolution can't be trusted to land back on the same device (on
@@ -941,7 +940,7 @@ fn refresh_tapes_view(ui: &MainWindow) {
 /// main.slint's own hardcoded defaults untouched.
 #[cfg(feature = "realtime")]
 fn prefill_remembered_audio_settings(ui: &MainWindow) {
-    let config = crate::device_config::DeviceConfig::load();
+    let config = crate::device_config::load();
     let Some(name) = config.last_input_device() else {
         return;
     };
@@ -953,7 +952,7 @@ fn prefill_remembered_audio_settings(ui: &MainWindow) {
         ui.set_output_device_text(output.clone().into());
     }
     ui.set_period_text(remembered.period.to_string().into());
-    ui.set_channel_offset_text(remembered.input_channel_offset.to_string().into());
+    ui.set_input_channels_text(crate::input_map::format_input_map(&remembered.input_map()).into());
 }
 
 /// If `prefill_remembered_audio_settings` just found something to fill
@@ -977,7 +976,17 @@ fn auto_connect_remembered_device(
     };
     let output = non_empty(&ui.get_output_device_text());
     let period = ui.get_period_text().parse::<usize>().ok();
-    let channel_offset = ui.get_channel_offset_text().parse::<usize>().unwrap_or(0);
+    // A malformed map blocks the connect and surfaces the error - never
+    // an unwrap_or fallback to some default map (REQ-908; a review of
+    // change 002 caught that this auto-connect path would otherwise
+    // turn a typo into a silent wrong-channel connect at startup).
+    let map = match crate::input_map::parse_input_map(&ui.get_input_channels_text()) {
+        Ok(map) => map,
+        Err(e) => {
+            ui.set_status_text(format!("not connected - {e}").into());
+            return;
+        }
+    };
     let mut slot = backend.borrow_mut();
     let status = connect(
         &mut slot,
@@ -985,7 +994,7 @@ fn auto_connect_remembered_device(
         Some(&input),
         output.as_deref(),
         period,
-        channel_offset,
+        &map,
     );
     ui.set_status_text(status.into());
     refresh(ui, &slot.as_ref().unwrap().snapshot());
@@ -1041,7 +1050,15 @@ fn connect_audio(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             let input = non_empty(&ui.get_input_device_text());
             let output = non_empty(&ui.get_output_device_text());
             let period = ui.get_period_text().parse::<usize>().ok();
-            let channel_offset = ui.get_channel_offset_text().parse::<usize>().unwrap_or(0);
+            // Malformed map: block the connect and say why - never a
+            // silent fallback map (REQ-908).
+            let map = match crate::input_map::parse_input_map(&ui.get_input_channels_text()) {
+                Ok(map) => map,
+                Err(e) => {
+                    ui.set_status_text(format!("not connected - {e}").into());
+                    return;
+                }
+            };
             let mut slot = backend.borrow_mut();
             let status = connect(
                 &mut slot,
@@ -1049,7 +1066,7 @@ fn connect_audio(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
                 input.as_deref(),
                 output.as_deref(),
                 period,
-                channel_offset,
+                &map,
             );
             ui.set_status_text(status.into());
             refresh(&ui, &slot.as_ref().unwrap().snapshot());

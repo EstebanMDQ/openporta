@@ -26,13 +26,14 @@ Make a cassette and drive it live:
 
 ```bash
 cargo run -p porta-app -- new ~/takes/test.porta --minutes 5
-cargo run -p porta-app --features realtime -- live ~/takes/test.porta --period 256 --in-offset 2
+cargo run -p porta-app --features realtime -- live ~/takes/test.porta --period 256 --in-map 3,4,5,6
 ```
 
-`--in-offset 2` matters on the L6: its channels 1-2 carry its own main
-mix, not a per-track send, so without the offset track inputs come from
-the wrong channels. Check the banner - it prints which device channels
-feed which tracks.
+`--in-map 3,4,5,6` matters on the L6: its channels 1-2 carry its own
+main mix, not a per-track send, so without the map track inputs come
+from the wrong channels. (This replaced `--in-offset 2` - change 002;
+same wiring, per-track form, `-` leaves a track silent.) Check the
+banner - it prints which device channel feeds which track.
 
 Keys: `p` play, `s` stop, `r` record, `1`-`4` arm/disarm (prints a
 status line each time, e.g. `1R - 2 - 3 - 4`), `[` rewind, `]`
@@ -143,6 +144,15 @@ Findings (fill in):
       already stopped, matching how `live` actually saves - not a
       background write racing live playback).
 - [ ] Reboot: the machine comes back up running.
+- [ ] Input map end to end (change 002, on the L6): `--in-map 3,4,5,6`
+      reproduces the old `--in-offset 2` wiring exactly; a scrambled
+      map (`6,5,4,3`) routes jacks to tracks in reverse; `--in-map 1,2`
+      (narrower than probe's 12-channel stream) still delivers the same
+      channels probe shows under those numbers - this exercises the
+      channel-order-under-a-narrower-stream assumption REQ-908's
+      probe-parity promise rests on. Each time, confirm the banner and
+      the UI status line name the right channel per track, with a real
+      signal and `probe` as the reference.
 
 Findings (fill in):
 

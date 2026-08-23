@@ -246,7 +246,10 @@ export component MainWindow inherits Window {
     in-out property <string> input-device-text: "(default)";
     in-out property <string> output-device-text: "(default)";
     in-out property <string> period-text: "256";
-    in-out property <string> channel-offset-text: "0";
+    // Per-track input channels, 1-based, matching what `probe` prints;
+    // "-" leaves a track silent (e.g. "3,-,5,6"). Replaced the single
+    // channel-offset field (change 002).
+    in-out property <string> input-channels-text: "1,2,3,4";
     in property <bool> connected: false;
     in property <string> connection-status: "not connected - silent, no real audio";
     in-out property <bool> show-settings: false;
@@ -401,8 +404,11 @@ export component MainWindow inherits Window {
                     }
                     VerticalLayout {
                         spacing: 4px;
-                        Text { text: "Input channel offset"; font-size: 11px; color: gray; }
-                        LineEdit { text <=> channel-offset-text; }
+                        Text { text: "Input channels"; font-size: 11px; color: gray; }
+                        LineEdit {
+                            text <=> input-channels-text;
+                            placeholder-text: "e.g. 3,4,5,6";
+                        }
                     }
                 }
 

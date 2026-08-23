@@ -2,6 +2,10 @@
 
 #[cfg(feature = "realtime")]
 mod device_config;
+// Ungated on purpose (see its module doc) so its tests run in the
+// plain CI gate; without `realtime` nothing calls it, hence the allow.
+#[cfg_attr(not(feature = "realtime"), allow(dead_code))]
+mod input_map;
 #[cfg(feature = "realtime")]
 mod realtime;
 mod render;
@@ -38,17 +42,18 @@ built with --features realtime:
   porta-app devices
   porta-app probe [--in NAME]
   porta-app live <dir> [--in NAME] [--out NAME] [--period N]
-                       [--in-offset N]
+                       [--in-map C1,C2,C3,C4]
 
---in-offset skips that many leading input channels before assigning
-the rest to tracks 1-4 in order. Use it on interfaces whose first
-channels carry something other than a per-track send - e.g. --in-offset
-2 on a Zoom L6, whose channels 1-2 are its own main mix. Don't guess
-the offset: run `probe` first, play into one input at a time, and read
-off which channel index actually lights up - interfaces don't always
-order their channels the way you'd expect.
+--in-map assigns a device input channel to each track, 1-based, matching
+the channel numbers `probe` prints; `-` leaves a track silent (e.g.
+--in-map 3,-,5,6). Use it on interfaces whose channels aren't a simple
+1..4 block - e.g. --in-map 3,4,5,6 on a Zoom L6, whose channels 1-2 are
+its own main mix. Don't guess: run `probe` first, play into one input
+at a time, and read off which channel actually lights up - interfaces
+don't always order their channels the way you'd expect. (--in-offset
+was replaced by --in-map; offset N is now N+1,N+2,N+3,N+4.)
 
-A successful connection remembers its device/period/offset per input
+A successful connection remembers its device/period/input-map per input
 device (~/.config/openporta/audio.json) and reuses them next time that
 same device is picked, so this only needs figuring out once per
 interface - pass a flag explicitly to override what was remembered.
@@ -202,10 +207,26 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
 
     let dir = args.first().ok_or("live needs a project directory")?;
     let engine = Engine::open(dir).map_err(|e| e.to_string())?;
+    // --in-offset was replaced by --in-map (change 002). An explicit
+    // error, not a silently ignored token: flag() never validates
+    // unknown arguments, so plain removal would leave the old flag
+    // silently doing nothing and the session recording from whatever
+    // map was remembered - a silent wrong-channel take.
+    if args.iter().any(|a| a == "--in-offset") {
+        return Err("--in-offset was replaced by --in-map C1,C2,C3,C4 (see probe)".to_string());
+    }
     let in_flag = flag(args, "--in");
     let out_flag = flag(args, "--out");
     let period_flag = parse_num::<usize>(args, "--period")?;
-    let offset_flag = parse_num::<usize>(args, "--in-offset")?;
+    // Same silent-fallback hazard for a present-but-valueless --in-map:
+    // flag() returns None for a trailing flag with no value.
+    let map_flag = match flag(args, "--in-map") {
+        Some(s) => Some(input_map::parse_input_map(s)?),
+        None if args.iter().any(|a| a == "--in-map") => {
+            return Err("--in-map needs a value, e.g. --in-map 3,4,5,6".to_string());
+        }
+        None => None,
+    };
 
     // A flag always wins. Otherwise, a blank --in falls back to
     // whichever device last connected successfully (M6.1's whole
@@ -213,42 +234,35 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
     // "default device" - on the pipewire host that's a generic
     // two-channel pseudo-device, not a real proxy to the L6 (found
     // 2026-08-21). Only once a real device name is settled can its
-    // remembered period/offset/output be looked up.
-    let config = device_config::DeviceConfig::load();
+    // remembered period/map/output be looked up.
+    let config = device_config::load();
     let in_name = in_flag.or_else(|| config.last_input_device());
     let resolved_input_name = realtime::resolve_input_device_name(in_name);
     let remembered = resolved_input_name
         .as_deref()
         .and_then(|name| config.get(name).cloned());
     let period = period_flag.or(remembered.as_ref().map(|r| r.period));
-    let channel_offset = offset_flag
-        .or(remembered.as_ref().map(|r| r.input_channel_offset))
-        .unwrap_or(0);
+    let map = map_flag
+        .or(remembered.as_ref().map(|r| r.input_map()))
+        .unwrap_or_else(|| std::array::from_fn(Some));
     let out_name = out_flag.or(remembered.as_ref().and_then(|r| r.output_device.as_deref()));
 
-    let mut session = realtime::start(engine, in_name, out_name, period, channel_offset)
-        .map_err(|e| e.to_string())?;
+    let mut session =
+        realtime::start(engine, in_name, out_name, period, &map).map_err(|e| e.to_string())?;
     if let Some(name) = &session.input_device {
-        device_config::DeviceConfig::remember(
+        device_config::remember(
             name,
             &session.output_device,
             session.period,
-            session.input_channel_offset,
+            session.input_map,
         );
     }
 
     println!("output: {}", session.output_device);
     match session.input_device.as_deref() {
         Some(name) => println!(
-            "input:  {name} (channels {}-{} -> tracks 1-{}{})",
-            session.input_channel_offset + 1,
-            session.input_channel_offset + session.input_tracks,
-            session.input_tracks,
-            if session.input_tracks < porta_engine::NUM_TRACKS {
-                " - fewer input channels than tracks, the rest record silence"
-            } else {
-                ""
-            }
+            "input:  {name} ({})",
+            input_map::format_status_long(&session.input_map)
         ),
         None => println!("input:  (none)"),
     }

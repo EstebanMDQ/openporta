@@ -735,6 +735,29 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       Device disconnected" once as PipeWire tears the stream down,
       immediately followed by a normal "saved." - harmless, just noisy;
       worth quieting later, not blocking.
+      Per-track input selection, 2026-08-23 (openspec/changes/002,
+      owner-requested, review-approved v3): the channel offset became a
+      per-track map. `--in-map 3,4,5,6` replaces `--in-offset 2` (the
+      old flag now errors explicitly rather than being silently
+      ignored by the validation-free flag() parser - a caught silent-
+      wrong-channel hazard); the UI's offset field became an "Input
+      channels" comma-list field sharing the same parser; a parse
+      error blocks the connect (never a fallback map - the startup
+      auto-connect path made that a real hazard); `-` marks an
+      unassigned track; the persistent status line reports the
+      validated per-track list (`[3,-,5,6]`). Everything data-shaped
+      (parse/format, routing plan, serde config + offset migration,
+      status formatters, 14 tests) lives in the new UNGATED
+      `input_map.rs` so it actually runs in the plain CI gate - the
+      review caught that device_config's own tests never did
+      (feature-gated module, default features empty); device_config.rs
+      keeps only file I/O. Capture wiring is per-track on both ring
+      sides (a positional-prefix Vec would misroute sparse maps).
+      Offset-era audio.json entries migrate on load, keyed on the
+      field being absent, not empty. Verified headlessly by the gate;
+      the on-device L6 checks are a new manual-checklist item (map
+      parity with the old offset, scrambled map, narrower-than-probe
+      stream).
 - [ ] M6.2 Performance pass: 128-256 frame period, callback-time
       instrumentation (verify: measured headroom documented in repo).
       Extended for the stereo bounce buss (REQ-905, openspec/changes/
