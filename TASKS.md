@@ -1351,7 +1351,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       boundary sample), then pin a regression bound from the measured
       clip fraction, not a guessed one. (verify: the four named
       numeric assertions above)
-- [ ] M7.13 porta-engine REQ-408 monitoring tests, two separate tests:
+- [x] M7.13 porta-engine REQ-408 monitoring tests, two separate tests:
       (a) dither-bound - prime the bus with a real first bounce, mute
       tracks 1-4, set a settled -6dB bus fader via BounceFader, run a
       measured pass lying entirely inside the primed region and ending
@@ -1364,6 +1364,19 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       each track_level_db reads above the meter floor while the
       block's audible output is exactly silent. (verify: the two
       assertions as stated)
+      Done 2026-08-23. tests/bounce_monitoring.rs, two tests with
+      deliberately opposite setups (folding them together is what a
+      review caught as unpassable: the dither test mutes the tracks,
+      and the mixer meters a muted track as silent by design).
+      The dither bound came out as a genuine confirmation of the
+      spec's derivation: predicted 0.5 LSB RMS scaled by -6dB =
+      0.2505 LSB, MEASURED 0.251 - three significant figures. Made the
+      assertion two-sided rather than just loosening it: an upper bound
+      at 1.25x catches regressions, and a lower bound at 0.5x catches
+      the vacuous case where the two captures aren't actually
+      independent. The metering test mutes the BUS instead, so the
+      audible output is exactly zero while both tracks read well above
+      the floor. Full gate green.
 - [ ] M7.14 porta-engine: allocator-counting harness - a test-only
       counting global allocator asserting zero alloc/dealloc on the
       simulated realtime path across record(), process_block(), and
