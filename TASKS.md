@@ -758,6 +758,29 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       the on-device L6 checks are a new manual-checklist item (map
       parity with the old offset, scrambled map, narrower-than-probe
       stream).
+      Verified on the real Pi + L6 same day: `--in-map 3,4,5,6`
+      connects with the correct per-track banner (`track1<-ch3 ...`)
+      and zero xruns; the remembered offset-2 config migrated and
+      produced identical wiring with no flag at all; a sparse
+      scrambled map (`6,-,4,3`) reports
+      `track1<-ch6 track2<-silent track3<-ch4 track4<-ch3`;
+      `--in-offset` and `--in-map 0,1,2,3` both error and block, exit
+      1. The on-hardware run also caught a REAL migration bug no
+      review or test had: re-saving the config dropped the legacy
+      offset of every entry NOT touched by that connect (the old field
+      is never re-serialized, and untouched entries had no map written
+      in its place) - fixed with an eager normalize() on load plus a
+      regression test for the untouched-sibling round trip; the one
+      damaged entry on the Pi was hand-restored to map form. Kiosk UI
+      relaunched on the new binary: auto-connect succeeded through the
+      new parse path using the migrated map (a parse failure would
+      have left it disconnected by design), screenshot confirms
+      connection and no layout regression. The Settings view's
+      channel-list status line and field can't be click-verified (same
+      no-input-injection limitation as every prior UI entry); their
+      formatters and parse are covered by the 15 ungated tests. The
+      narrower-than-probe `--in-map 1,2` check remains on the manual
+      checklist for a session with real signal into jacks 1-2.
 - [ ] M6.2 Performance pass: 128-256 frame period, callback-time
       instrumentation (verify: measured headroom documented in repo).
       Extended for the stereo bounce buss (REQ-905, openspec/changes/
