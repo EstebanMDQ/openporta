@@ -911,3 +911,20 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       Worth a real click-through later if an input tool gets approved.
       Full gate green across all four feature combinations, both
       passes.
+      Bounce wired into the UI, 2026-08-23, requested directly:
+      `Command::Bounce`/`Engine::bounce()` have existed since M3 but
+      were only ever reachable from a session script - added a "Bounce"
+      TactileButton next to Save/Undo. Bounce is blocking and stop-
+      gated like Save/Undo/Export, so it's wired through the same
+      `with_engine` disconnect/run/reconnect path, not the live command
+      queue - structurally identical to the already-verified Save/
+      Undo/Export handlers, not a new pattern. No behavior change to
+      bounce itself (still the mono sum of tracks 1-3 onto track 4,
+      REQ-401), just a way to reach it. Deployed and screenshotted on
+      the real Pi: button renders correctly, connected to the L6, no
+      layout regression. Did not verify by actually clicking it - same
+      no-input-injection-tool limitation as the Tapes view above;
+      Engine::bounce() itself is already covered by
+      crates/porta-engine/tests/bounce.rs, and the handler's own shape
+      is identical to Save/Undo/Export's, already proven live on this
+      Pi. Full gate green across all four feature combinations.
