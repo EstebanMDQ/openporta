@@ -250,69 +250,6 @@ impl Engine {
         self.transport.stop();
     }
 
-    /// Bounce tracks 1-3 down to track 4 (REQ-401). The input is the
-    /// engine's own post-fader mono sum of the source tracks; pans are
-    /// ignored, matching the reference hardware's bus (REQ-603). The sum
-    /// is printed through a record pass, so generation loss and undo
-    /// come for free.
-    ///
-    /// Rewinds to the start, records the whole tape, and leaves the
-    /// transport stopped. Refused while rolling.
-    pub fn bounce(&mut self) -> Result<(), EngineError> {
-        if !self.transport.is_stopped() {
-            return Err(EngineError::NotStopped("bounce"));
-        }
-        const DEST: usize = NUM_TRACKS - 1;
-        let sources: Vec<usize> = (0..DEST).collect();
-        // Muted tracks stay out of the bounce, same as they stay out of
-        // the live mix - "mute" means "don't include this," not just
-        // "don't monitor it."
-        let gains: Vec<f32> = sources
-            .iter()
-            .map(|&t| {
-                if self.mixer.is_muted(t) {
-                    0.0
-                } else {
-                    db_to_amp(self.mixer.fader_db(t))
-                }
-            })
-            .collect();
-
-        let armed_before = self.armed;
-        self.armed = [false; NUM_TRACKS];
-        self.armed[DEST] = true;
-        self.seek(0);
-        self.record();
-
-        let len = self.tape.len_samples();
-        let mut sum = vec![0.0f32; MAX_BLOCK];
-        let mut scratch = vec![0.0f32; MAX_BLOCK];
-        let mut sink_l = vec![0.0f32; MAX_BLOCK];
-        let mut sink_r = vec![0.0f32; MAX_BLOCK];
-        let mut pos = 0;
-        while pos < len {
-            let n = MAX_BLOCK.min(len - pos);
-            sum[..n].fill(0.0);
-            for (i, &t) in sources.iter().enumerate() {
-                self.tape.read(t, pos, &mut scratch[..n]);
-                for (dst, &s) in sum[..n].iter_mut().zip(&scratch[..n]) {
-                    *dst += s * gains[i];
-                }
-            }
-            let quiet = &scratch[..0];
-            let inputs: [&[f32]; NUM_TRACKS] =
-                std::array::from_fn(|t| if t == DEST { &sum[..n] } else { quiet });
-            let done = self.process_block(&inputs, &mut sink_l[..n], &mut sink_r[..n]);
-            if done == 0 {
-                break;
-            }
-            pos += done;
-        }
-        self.stop();
-        self.armed = armed_before;
-        Ok(())
-    }
-
     /// Engage recording on the armed tracks, opening a pass for each.
     pub fn record(&mut self) {
         if self.bus_armed {
@@ -605,10 +542,6 @@ impl Engine {
         self.journal.save()?;
         Ok(())
     }
-}
-
-fn db_to_amp(db: f32) -> f32 {
-    10f32.powf(db / 20.0)
 }
 
 /// Per-pass seed: cassette seed mixed with the pass counter, so each pass

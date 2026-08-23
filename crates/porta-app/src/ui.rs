@@ -581,12 +581,17 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
             let Some(ui) = ui_weak.upgrade() else {
                 return;
             };
-            let path = ui.get_cassette_path().to_string();
+            // A bounce is no longer a blocking batch command: it is
+            // arming the bus and pressing Record, and it rolls in real
+            // time so faders/pans can be ridden while it prints
+            // (REQ-401/404). Minimal wiring for now - the bus's own
+            // fader/mute strip and a proper transport-aware button are
+            // M7.15.
             let mut slot = backend.borrow_mut();
-            let status = with_engine(&mut slot, &path, |engine| {
-                status_message("bounce", engine.bounce())
-            });
-            ui.set_status_text(status.into());
+            let backend_mut = slot.as_mut().expect("backend always present between ticks");
+            backend_mut.send(Command::BounceArm { on: true });
+            backend_mut.send(Command::Record);
+            ui.set_status_text("bouncing - press Stop when done".into());
             refresh(&ui, &slot.as_ref().unwrap().snapshot());
         });
     }

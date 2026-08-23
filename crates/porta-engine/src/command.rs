@@ -75,7 +75,6 @@ pub enum Command {
     BounceMute {
         on: bool,
     },
-    Bounce,
     Undo,
     Redo,
     Save,
@@ -86,10 +85,7 @@ impl Command {
     /// take unbounded time. These are never safe inside an audio
     /// callback.
     pub fn is_blocking(self) -> bool {
-        matches!(
-            self,
-            Command::Bounce | Command::Undo | Command::Redo | Command::Save
-        )
+        matches!(self, Command::Undo | Command::Redo | Command::Save)
     }
 }
 
@@ -143,7 +139,6 @@ pub fn apply(engine: &mut Engine, command: Command) -> Result<(), EngineError> {
         Command::BounceArm { on } => engine.set_bus_armed(on),
         Command::BounceFader { db } => engine.mixer().set_bus_fader_db(db),
         Command::BounceMute { on } => engine.mixer().set_bus_muted(on),
-        Command::Bounce => engine.bounce()?,
         Command::Undo => engine.undo()?,
         Command::Redo => engine.redo()?,
         Command::Save => engine.save()?,
@@ -157,7 +152,7 @@ mod tests {
 
     #[test]
     fn disk_touching_commands_are_marked_blocking() {
-        for c in [Command::Bounce, Command::Undo, Command::Redo, Command::Save] {
+        for c in [Command::Undo, Command::Redo, Command::Save] {
             assert!(c.is_blocking(), "{c:?} should be blocking");
         }
         for c in [

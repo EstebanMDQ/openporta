@@ -71,6 +71,11 @@ Verification is `cargo test --workspace` plus the noted assertions.
       (verify: all three tones present in the bounce, sources untouched,
       faders respected and pans ignored, undo byte-exact, character
       applied again, reproducible, refused while rolling)
+      SUPERSEDED by M7 (change 001, spec v1.1): this task's verify text
+      describes the mono-sum-onto-track-4 bounce, which no longer
+      exists. Bounce is now a real-time stereo pass onto the dedicated
+      bounce bus - see M7.7/M7.10. Left checked and unedited above as
+      the historical record of what shipped at the time.
 - [x] M3.2 Mixdown renderer + WAV export, 16-bit default / 24-bit flag
       (verify: script export and render command are byte-identical,
       headers correct at both depths)
@@ -1278,7 +1283,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       bus instead of a mono-only window. New reference: no clipping,
       comparable level (rmsL 4970 vs 4861), wider image (L-R 912 vs
       737). ***
-- [ ] M7.10 porta-engine + porta-app: delete the old bounce -
+- [x] M7.10 porta-engine + porta-app: delete the old bounce -
       Command::Bounce and its is_blocking() arm, Engine::bounce(), the
       disk_touching_commands_are_marked_blocking assertion about it;
       rewrite crates/porta-engine/tests/bounce.rs wholesale to the new
@@ -1298,6 +1303,21 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       refused while a track pass is open (REQ-405), reproducible; no
       reference to the deleted paths remains; gate green across all
       four feature combinations)
+      Done 2026-08-23. Command::Bounce, its is_blocking arm,
+      Engine::bounce() and the now-unused db_to_amp helper are gone;
+      the blocking-command test asserts over the remaining three.
+      bounce.rs rewritten wholesale - 10 tests, all new semantics, not
+      ports: prints onto the bus, honours pans (the inverse of the
+      deleted REQ-603 test), respects faders, excludes muted tracks,
+      leaves ALL FOUR sources untouched (the old bounce consumed track
+      4), atomic undo/redo, folds the previous generation forward,
+      character compounds, REQ-405 exclusion, reproducible with the two
+      channels genuinely differing, and dominant-frequency identity.
+      ui.rs's Bounce button now sends BounceArm+Record through the
+      command queue instead of a blocking call - minimal, so --features
+      ui keeps building; the bus fader/mute strip is M7.15. M3.1 got a
+      superseded-by-M7 note appended rather than being edited. Full
+      gate green, no references to the deleted paths remain.
 - [ ] M7.11 porta-engine: generation_loss.rs REQ-403 rewrite, in
       place - prime (bounce once with tracks 1-4 unmuted), then mute
       all four and bounce three more times, measuring generations
