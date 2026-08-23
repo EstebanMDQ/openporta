@@ -20,7 +20,7 @@ use crate::filter::Bandwidth;
 use crate::flutter::Flutter;
 use crate::noise::Hiss;
 use crate::saturation::Saturation;
-use crate::Chain;
+use crate::{AudioProcessor, Chain};
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TapeCharacter {
@@ -75,8 +75,18 @@ impl TapeCharacter {
         }
     }
 
+    /// Stage positions `build_chain` constructs at, in order - kept next
+    /// to it so `reseed_chain` (which has to reseed the same two seeded
+    /// stages without knowing their types) can't drift out of sync with
+    /// what's actually built here.
+    const HISS_STAGE: usize = 1;
+    const FLUTTER_STAGE: usize = 3;
+
     /// Build the record-path chain for one pass. `pass_seed` decorrelates
     /// flutter and hiss between passes so bounces compound (REQ-304).
+    /// Only for building a chain fresh, off the realtime thread (cassette
+    /// open/create) - reseeding an existing one for a new pass is
+    /// `reseed_chain`, which does the same thing without allocating.
     pub fn build_chain(&self, pass_seed: u32) -> Chain {
         let mut stages: Vec<Box<dyn crate::AudioProcessor>> = vec![
             Box::new(Saturation::new(self.drive_db)),
@@ -92,6 +102,23 @@ impl TapeCharacter {
             stages.push(Box::new(Crush::new(params)));
         }
         Chain::new(stages)
+    }
+
+    /// Realtime-safe equivalent of `build_chain`: resets every stage of
+    /// an already-built chain in place and reseeds the two that carry
+    /// their own randomness (Hiss, Flutter), the same derivation
+    /// `build_chain` uses - no allocation, so `Engine::record()` (which
+    /// runs on the audio callback) can call this instead of rebuilding a
+    /// `Chain` from scratch every time recording engages. `chain` MUST
+    /// have been built by this same `TapeCharacter`'s `build_chain` (same
+    /// stage count/order - `Crush` present or not changes nothing here
+    /// since only indices 1 and 3 are touched); `TapeCharacter` is fixed
+    /// for a cassette's whole life (REQ-103), so that invariant holds for
+    /// as long as one `Engine` is open.
+    pub fn reseed_chain(&self, chain: &mut Chain, pass_seed: u32) {
+        chain.reset();
+        chain.reseed_stage(Self::HISS_STAGE, pass_seed ^ 0x5f5f_5f5f);
+        chain.reseed_stage(Self::FLUTTER_STAGE, pass_seed);
     }
 }
 
@@ -182,6 +209,30 @@ mod tests {
         let other = process_in_blocks(&mut c.build_chain(4), &input, 512);
         assert_eq!(a, b, "same pass seed must reproduce");
         assert_ne!(a, other, "different pass seed must differ");
+    }
+
+    #[test]
+    fn reseed_chain_matches_a_freshly_built_one() {
+        // The property record() now depends on instead of allocating a
+        // fresh Chain every pass (a real, pre-existing REQ-902 violation
+        // found independent of the bounce proposal, fixed here): reusing
+        // one Chain across passes via reseed_chain must be indistinguishable
+        // from build_chain(seed) on a brand new one, for any seed and
+        // regardless of what the chain's state looked like before.
+        let input = sine(440.0, -6.0, 48_000);
+        let c = TapeCharacter::new(42);
+
+        let mut reused = c.build_chain(1);
+        let _ = process_in_blocks(&mut reused, &sine(220.0, -3.0, 48_000), 512);
+        c.reseed_chain(&mut reused, 3);
+        let from_reuse = process_in_blocks(&mut reused, &input, 512);
+
+        let fresh = process_in_blocks(&mut c.build_chain(3), &input, 512);
+
+        assert_eq!(
+            from_reuse, fresh,
+            "reseeding a used chain must match a fresh build_chain with the same seed"
+        );
     }
 
     #[test]

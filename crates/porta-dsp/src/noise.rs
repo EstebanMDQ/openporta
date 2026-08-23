@@ -54,6 +54,14 @@ impl AudioProcessor for Hiss {
         self.state = self.seed;
         self.prev = 0.0;
     }
+
+    /// Unlike `reset` (back to the seed this instance was built with),
+    /// this takes a fresh one - what `record()` needs each pass (REQ-304)
+    /// without reallocating a new `Hiss`.
+    fn reseed(&mut self, seed: u32) {
+        self.seed = seed | 1;
+        self.reset();
+    }
 }
 
 #[cfg(test)]

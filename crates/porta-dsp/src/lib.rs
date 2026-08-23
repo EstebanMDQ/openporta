@@ -20,6 +20,17 @@ pub const MAX_BLOCK: usize = 4096;
 pub trait AudioProcessor: Send {
     fn process(&mut self, block: &mut [f32]);
     fn reset(&mut self);
+    /// Reset state the way `reset()` does, but also re-seed whatever
+    /// randomness this stage carries for a fresh pass (REQ-304). Default
+    /// no-op-beyond-`reset` for stages with no seeded state (Saturation,
+    /// Bandwidth, Crush) - only `Hiss` and `Flutter` override this.
+    /// Exists so a `Chain` built once, off the realtime thread, can be
+    /// reused pass after pass in place rather than rebuilt (which would
+    /// re-`Box` every stage on the audio callback, see
+    /// `character::TapeCharacter::reseed_chain`).
+    fn reseed(&mut self, _seed: u32) {
+        self.reset();
+    }
     fn latency_samples(&self) -> usize {
         0
     }
@@ -42,6 +53,17 @@ impl Chain {
 
     pub fn latency_samples(&self) -> usize {
         self.stages.iter().map(|s| s.latency_samples()).sum()
+    }
+
+    /// Reseed one stage by its position in the `Vec` `build_chain`
+    /// constructed - an internal invariant between this and whichever
+    /// `build_chain`-equivalent knows the stage order, not something a
+    /// caller should be deriving independently. Indexes directly
+    /// (panics out of range) rather than a silent `get_mut` no-op: if
+    /// the two ever drift, a loud panic in testing is far better than a
+    /// stage quietly never getting reseeded again.
+    pub fn reseed_stage(&mut self, index: usize, seed: u32) {
+        self.stages[index].reseed(seed);
     }
 }
 

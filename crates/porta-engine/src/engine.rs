@@ -80,6 +80,8 @@ impl Engine {
         project.manifest.apply_to(&mut mixer);
         let mut transport = Transport::new(tape.len_samples());
         transport.seek(project.manifest.playhead);
+        // Copied out before `project` moves into the struct literal below.
+        let character = project.manifest.character;
         Ok(Self {
             tape,
             transport,
@@ -89,9 +91,13 @@ impl Engine {
             armed: [false; NUM_TRACKS],
             monitor: [false; NUM_TRACKS],
             passes: [const { None }; NUM_TRACKS],
-            // Replaced per pass in `record()`; a passthrough placeholder
-            // keeps the array populated while stopped.
-            chains: (0..NUM_TRACKS).map(|_| Chain::passthrough()).collect(),
+            // Built for real here, off the realtime thread, so `record()`
+            // (which runs on it) only ever has to reseed an existing
+            // chain in place, not allocate a new one (REQ-902 - see
+            // reseed_chain's doc comment). The seed itself doesn't matter
+            // yet - every track's chain gets a real pass seed the first
+            // time record() engages it, before anything's been written.
+            chains: (0..NUM_TRACKS).map(|_| character.build_chain(0)).collect(),
             pass_counter: 0,
             pass_buffer_fallbacks: 0,
             processed: vec![vec![0.0; MAX_BLOCK]; NUM_TRACKS],
@@ -256,9 +262,17 @@ impl Engine {
                 // record.rs's module doc comment).
                 let spares = self.journal.take_spares(t);
                 self.passes[t] = Some(RecordPass::with_spares(t, start, seed, MAX_BLOCK, spares));
-                // A fresh chain per pass: flutter and hiss get their own
-                // seed so successive generations decorrelate (REQ-304).
-                self.chains[t] = self.project.manifest.character.build_chain(seed);
+                // Reseed the track's existing chain in place rather than
+                // building a fresh one (that used to be a realtime-thread
+                // allocation - see reseed_chain's doc comment; found in
+                // review independent of the bounce proposal). Flutter and
+                // hiss still get their own seed each pass so successive
+                // generations decorrelate (REQ-304) - reseed_chain does
+                // that the same way build_chain always did.
+                self.project
+                    .manifest
+                    .character
+                    .reseed_chain(&mut self.chains[t], seed);
             }
         }
         self.transport.record();

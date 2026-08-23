@@ -123,6 +123,14 @@ impl AudioProcessor for Flutter {
         self.state = self.seed;
     }
 
+    /// Unlike `reset` (back to the seed this instance was built with),
+    /// this takes a fresh one - what `record()` needs each pass (REQ-304)
+    /// without reallocating a new `Flutter`.
+    fn reseed(&mut self, seed: u32) {
+        self.seed = seed | 1;
+        self.reset();
+    }
+
     fn latency_samples(&self) -> usize {
         CENTRE
     }
