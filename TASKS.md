@@ -1130,7 +1130,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       copy and diffing, then restoring) - so no re-bless here, and
       M7.9's regeneration event still covers only the op change, as
       the task hoped. Full gate green, all four feature combos.
-- [ ] M7.5 porta-engine: journal stereo entry + bus reserve.
+- [x] M7.5 porta-engine: journal stereo entry + bus reserve.
       Entry.right_track: Option<usize> #[serde(default)] (None = every
       existing single-channel entry; len stays per-channel);
       Entry::bytes() doubles when right_track.is_some(); one payload
@@ -1146,6 +1146,30 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       reverted state; a pre-existing journal JSON still loads; eviction
       accounting counts a stereo entry at 2x; the reserve hands out
       buffer A then B with zero allocation and a third take falls back)
+      Done 2026-08-23. Entry gained right_track (#[serde(default)]) plus
+      a PassTarget::{Track,Bus} accessor - the virtual bus slots live
+      ONLY in the serialized form and target() is what code matches on,
+      so an index past NUM_TRACKS can never reach a track array (and
+      they're deliberately NUM_TRACKS/+1, which would panic loudly
+      rather than alias track 0 if anything ever tried). bytes() charges
+      a stereo entry 2x. pending_writes became a tagged Pending enum
+      (Track{chunks} vs Bus{left,right}) - the two really do have
+      different storage shapes and different reserves, so give-back is
+      routed by the tag, with a debug_assert that entry target and
+      payload tag agree. undo/redo collapsed into one swap_with_tape
+      ordered so everything fallible happens BEFORE both channel writes,
+      which is what makes a stereo revert atomic against failure. The
+      bus reserve is two full-tape pairs, allocated in Engine::assemble
+      via with_bus_reserve (Journal::new can't know the tape length);
+      buffers are given back WITHOUT clearing, unlike chunks - they're
+      index-written and must keep their length, and clearing would force
+      a ~170MB re-resize on the audio thread. 5 new tests: both-channel
+      undo/redo with a track proven untouched, 2x byte accounting, a
+      pre-change journal JSON still loading as single-channel, the
+      reserve handing out A then B then reporting empty (and refilling
+      on flush), and an evicted-while-pending bus entry returning its
+      buffers to the bus reserve with every track's chunk reserve
+      untouched. Full gate green, golden unaffected.
 - [ ] M7.6 porta-engine: bus arm/fader/mute state + non-blocking
       Command::BounceArm/BounceFader/BounceMute, REQ-405 mutual
       exclusion (arming the bus clears all 4 track arms and vice

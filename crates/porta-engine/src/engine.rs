@@ -75,7 +75,11 @@ impl Engine {
     }
 
     fn assemble(project: Project, tape: Tape) -> Result<Self, EngineError> {
-        let journal = Journal::load(project.undo_dir())?;
+        // The bounce reserve is sized to this cassette's tape length and
+        // allocated here, off the realtime thread, alongside `Tape`
+        // itself - a bounce engages from a non-blocking command, so it
+        // can never allocate these for itself (REQ-902).
+        let journal = Journal::load(project.undo_dir())?.with_bus_reserve(tape.len_samples());
         let mut mixer = Mixer::new();
         project.manifest.apply_to(&mut mixer);
         let mut transport = Transport::new(tape.len_samples());
