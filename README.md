@@ -1,5 +1,7 @@
 # openporta
 
+***English** · [Español](README.es.md)*
+
 A software emulation of a 4-track cassette portastudio.
 
 Four mono tracks, a fixed set of controls, and a destructive workflow.
@@ -11,7 +13,8 @@ this is an instrument, not a DAW.
 
 - **Four mono tracks, one stereo master.** No more, ever.
 - **Destructive recording.** Recording over a track erases it. Bouncing
-  tracks 1-3 onto track 4 overwrites track 4.
+  prints the mix onto a dedicated stereo bounce bus, in real time, so
+  faders and pans can be ridden while it goes down.
 - **Real generation loss.** Tape character is printed at record time, so
   every bounce saturates, dulls, and wobbles the material again, and the
   noise floor climbs. Three generations sound like three generations.
@@ -65,22 +68,25 @@ Zoom L6 on both macOS and a Raspberry Pi 4.
 | M3 bounce, mixdown, WAV export, CLI | done |
 | M4 realtime audio (cpal) | verified on macOS and Pi hardware |
 | M5 Slint UI: transport, track strips (arm/mute/monitor/fader/pan), meters, tape position bar, save/undo, cassette Tapes view, export, real audio | done |
+| M7 stereo bounce bus (change 001) | in progress - engine complete, UI remaining |
 | M6 Raspberry Pi deployment | in progress - aarch64 build, ALSA/PipeWire device layer, full-duplex record/save, remembered-device auto-connect, kiosk auto-launch with taskbar/desktop icons, and autosave-on-stop all verified on real hardware; performance profiling (M6.2) still open |
 
-A realtime-safety bug was found and fixed this cycle: recording briefly
-allocated on the audio callback thread (`RecordPass`'s undo buffer),
-which the spec explicitly forbids. Displaced audio is now captured in
-small pre-reserved chunks instead of one large on-demand allocation -
-see `TASKS.md`'s M4.4 follow-up for the full story, including a first
-attempt at the fix that didn't hold up under review and the corrected
-version that did.
+Three separate realtime-safety bugs have been found and fixed here,
+none of them by a crash: recording allocated a whole-tape-sized buffer
+on the audio callback thread; an eviction path dropped its pre-reserved
+chunks back to the heap instead of returning them; and engaging
+recording rebuilt the entire DSP chain - four or five allocations -
+every time, unnoticed for months. Each was caught by adversarial review
+and fixed with a regression test.
 
-A proposal for a dedicated stereo bounce buss (real-time printed,
-repeatable layering, proper stereo image) is under active review in
-`openspec/changes/001-stereo-repeatable-bounce.md` - not yet
-implemented. This project requires a written proposal and a passing
-spec review before any settled, user-visible behavior changes; that one
-has been through several rounds already, each catching something real.
+The proposal for a dedicated stereo bounce bus
+(`openspec/changes/001-stereo-repeatable-bounce.md`) was **approved
+after twelve rounds of review across thirteen revisions**, every round
+but the last finding a real bug or gap. It is now folded into
+`openspec/spec.md` (v1.1) and the engine side is implemented: real-time
+stereo printing, atomic two-channel undo, bounces that fold forward
+instead of replacing, and the master fader provably never reaching
+tape. The UI surface for the bus's own fader and mute is what remains.
 
 Today you drive it through session scripts, the CLI, or the UI.
 `TASKS.md` is the queue.
@@ -104,7 +110,10 @@ A session script is a list of ops:
   {"op": "arm", "track": 0, "on": false},
   {"op": "fader", "track": 0, "db": -3.0},
   {"op": "pan", "track": 0, "value": -0.4},
-  {"op": "bounce"},
+  {"op": "bounce_arm"},
+  {"op": "seek", "seconds": 0},
+  {"op": "bounce", "seconds": 30},
+  {"op": "bounce_arm", "on": false},
   {"op": "seek", "seconds": 0},
   {"op": "export", "out": "discard.wav"},
   {"op": "play", "seconds": 30},
@@ -187,6 +196,7 @@ session; if it changes, something changed, and the reason belongs in
 mytape.porta/
   manifest.json        tape length, character and seed, mixer settings
   tape/track{0..3}.raw raw 16-bit samples, saved in 5-second chunks
+  tape/bounce_{l,r}.raw the stereo bounce bus, same chunked format
   undo/                the journal that makes undo possible
 ```
 

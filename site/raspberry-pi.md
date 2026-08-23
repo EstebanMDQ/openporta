@@ -4,6 +4,8 @@ description: What it took to turn openporta into a real, dedicated instrument on
 date: 2026-08-22
 ---
 
+***English** · [Español](es/raspberry-pi.html)*
+
 # Raspberry Pi setup
 
 The engine and UI don't know they're running on anything in particular
@@ -26,9 +28,9 @@ hardware as a single real device instead, which is what actually made
 device selection by name usable on this platform.
 
 Once a device is chosen, the app remembers it - `~/.config/openporta/`
-holds the last input/output device, period, and channel offset that
-connected successfully, and the app tries that combination again
-automatically at every launch. It's meant to come on ready, the way a
+holds the last input/output device, period, and per-track input channel
+map that connected successfully, and the app tries that combination
+again automatically at every launch. It's meant to come on ready, the way a
 real piece of hardware does, not sit idle waiting to be told what to
 plug into.
 

@@ -4,6 +4,8 @@ description: A software emulation of a 4-track cassette portastudio - four mono 
 date: 2026-08-22
 ---
 
+***English** · [Español](es/index.html)*
+
 # openporta
 
 A software emulation of a 4-track cassette portastudio, written in Rust.

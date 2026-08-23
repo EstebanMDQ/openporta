@@ -4,6 +4,8 @@ description: Crate layout, the DSP chain, realtime safety, and how audio correct
 date: 2026-08-22
 ---
 
+***English** · [Español](es/architecture.html)*
+
 # How it's built
 
 ## The crates
@@ -58,13 +60,15 @@ fader, transport commands) cross a wait-free queue instead of touching
 the engine directly.
 
 This isn't a rule that only lives in a document. It's been the subject
-of two real bugs found and fixed on this project: recording briefly
+of several real bugs found and fixed on this project: recording briefly
 allocated a buffer sized to the whole remaining tape on that thread
 (fixed by capturing displaced audio in small, pre-reserved chunks
-instead of one large on-demand allocation), and a subsequent eviction
-path was found to silently drop those chunks back to the heap instead
-of returning them to the reserve - found by an adversarial spec review
-of an unrelated proposal, fixed the same way the first one was: with a
+instead of one large on-demand allocation); an eviction path was found
+to silently drop those chunks back to the heap instead of returning
+them to the reserve; and engaging recording rebuilt the entire DSP
+chain from scratch - four or five heap allocations - every single time,
+which nothing had noticed for months. Each was found by adversarial
+review rather than by a crash, and each was fixed the same way: with a
 regression test that fails against the old behavior.
 
 ## Testing without a listener
@@ -93,7 +97,10 @@ DSP chain - is written down as a formal specification, and it's treated
 as a constitution, not a suggestion. Anything that would reverse a
 settled, user-visible decision requires a written proposal and an
 adversarial review before a line of implementation gets written - not
-a formality, either: a proposal for a stereo bounce buss has been
-through several rounds of real review, each one finding an actual bug
-or an actual gap, none of them rubber-stamped through. See
-[Status](status.md) for where that stands.
+a formality, either: the proposal that replaced the original mono
+bounce with a real-time stereo bounce bus went through twelve rounds of
+review across thirteen revisions before it was approved, and all but
+the last found an actual bug or an actual gap - including bugs in
+already-shipped code that had nothing to do with the proposal itself.
+None of them were rubber-stamped through. See [Status](status.md) for
+where that stands.

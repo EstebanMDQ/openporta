@@ -4,6 +4,8 @@ description: What's done, what's in progress, and how a change to a settled deci
 date: 2026-08-22
 ---
 
+***English** · [Español](es/status.html)*
+
 # Status
 
 ## Milestones
@@ -13,10 +15,11 @@ date: 2026-08-22
 | Scaffolding, CI, test instruments | done |
 | Tape engine: transport, record, punch, undo, persistence | done |
 | Lo-fi DSP and generation loss | done |
-| Bounce, mixdown, WAV export, CLI | done |
+| Bounce, mixdown, WAV/MP3/MP4 export, CLI | done |
 | Realtime audio (cpal) | verified on macOS and Raspberry Pi hardware |
 | Slint UI: transport, track strips (arm/mute/monitor/fader/pan), meters, tape position bar, save/undo, cassette management, export, real audio | done |
 | Raspberry Pi deployment | in progress - see below |
+| Stereo bounce bus (change 001) | in progress - engine complete, UI remaining |
 
 The Raspberry Pi milestone covers a lot of ground already: aarch64
 build, the ALSA/PipeWire device layer, full-duplex record/save,
@@ -26,17 +29,25 @@ verified on real hardware. A formal callback-time performance
 measurement is the piece still open - see [Raspberry Pi
 setup](raspberry-pi.md) for the detail.
 
-## A real bug, found and fixed this cycle
+## Real bugs, found and fixed
 
-Recording briefly allocated memory on the realtime audio callback
-thread - the project's own specification explicitly forbids that,
-since an allocation can block unpredictably and the audio thread has a
-hard deadline every callback. It was fixed by capturing displaced
-audio in small, pre-reserved chunks instead of one large allocation
-sized to the whole remaining tape. A second, related bug (an eviction
-path silently dropping those chunks instead of returning them) was
-found afterward by an adversarial review of an unrelated proposal, and
-fixed with its own regression test.
+Three separate violations of the project's own realtime rule - no
+allocation on the audio callback thread, ever - have been found and
+fixed here, none of them by a crash:
+
+- Recording briefly allocated a buffer sized to the whole remaining
+  tape on that thread. Fixed by capturing displaced audio in small,
+  pre-reserved chunks instead.
+- An eviction path silently dropped those chunks back to the heap
+  instead of returning them to the reserve, which both deallocated on
+  the audio thread and leaked the reserve over time.
+- Engaging recording rebuilt the entire DSP chain from scratch - four
+  or five heap allocations - every single time. This one had been
+  shipping unnoticed for months.
+
+The second and third were found by adversarial reviews of a proposal
+that had nothing to do with them. Each was fixed with a regression test
+that fails against the old behavior.
 
 ## Changing a settled decision
 
@@ -46,19 +57,27 @@ casually "improved" in passing. Reversing or extending a settled,
 user-visible decision requires a written proposal and a pass by an
 adversarial spec review before any implementation begins.
 
-A proposal for a dedicated, real-time-printed stereo bounce buss - to
-fix two real limitations of today's bounce (it collapses stereo
-information to mono, and it's one-shot, so a second bounce silently
-discards the first) - is a live example of that process working as
-intended rather than as a formality. It has been through several
-rounds of review. Each round has found something real: a genuine
-design flaw in an early version of the destination storage, a realtime
+The proposal that replaced the original bounce with a dedicated,
+real-time-printed stereo bounce bus is the clearest example of that
+process working as intended rather than as a formality. It fixed two
+real limitations: the old bounce collapsed stereo information to mono,
+and it was one-shot, so a second bounce silently discarded the first.
+
+It took **twelve rounds of review across thirteen revisions** before it
+was approved. Every round but the last found something real: a design
+flaw in an early version of the destination storage, a realtime
 allocation risk in how a stereo pass would capture undo data, a
-mathematically inverted rule for what you'd hear while bouncing, and a
+mathematically inverted rule for what you'd hear while bouncing, a
 resident-memory estimate that had to be recomputed more than once
-against the code as it actually shipped, not as it was assumed to
-work. None of it has been rubber-stamped through, and none of it ships
-until a review comes back clean.
+against the code as it actually shipped rather than as it was assumed
+to work, and - twice - a test specified in the proposal that could
+never have passed as written. None of it was rubber-stamped through.
+
+The engine side is now implemented and green: a real-time stereo pass,
+atomic two-channel undo, the bus folding its own prior content forward
+so bounces layer instead of replacing, and the master fader provably
+never reaching tape. The remaining work is the UI surface for the bus's
+own fader and mute.
 
 That's slower than just writing the feature. It's also exactly the
 tradeoff a project like this is supposed to make.

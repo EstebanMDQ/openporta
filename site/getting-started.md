@@ -4,6 +4,8 @@ description: Running openporta from the command line, session scripts, and where
 date: 2026-08-22
 ---
 
+***English** · [Español](es/getting-started.html)*
+
 # Getting started
 
 openporta is a Rust workspace. There's no installer - build it, or grab
@@ -30,7 +32,10 @@ A session script is a plain JSON list of operations:
   {"op": "arm", "track": 0, "on": false},
   {"op": "fader", "track": 0, "db": -3.0},
   {"op": "pan", "track": 0, "value": -0.4},
-  {"op": "bounce"},
+  {"op": "bounce_arm"},
+  {"op": "seek", "seconds": 0},
+  {"op": "bounce", "seconds": 30},
+  {"op": "bounce_arm", "on": false},
   {"op": "seek", "seconds": 0},
   {"op": "export", "out": "discard.wav"},
   {"op": "play", "seconds": 30},
@@ -38,6 +43,12 @@ A session script is a plain JSON list of operations:
   {"op": "save"}
 ]}
 ```
+
+Bouncing is arming the bus and rolling the transport, not a batch
+command: the mix prints in real time onto a dedicated stereo bounce
+bus, so faders and pans can be ridden while it goes down, and the bus
+keeps its own prior content - bounce again and the previous generation
+folds forward rather than being replaced.
 
 `export` writes whatever the machine has played since the *previous*
 export, which is why the example above throws one away before the take
@@ -85,6 +96,7 @@ Linux (x86_64 and aarch64), and Windows, with both the `realtime` and
 mytape.porta/
   manifest.json        tape length, character and seed, mixer settings
   tape/track{0..3}.raw raw 16-bit samples, saved in 5-second chunks
+  tape/bounce_{l,r}.raw the stereo bounce bus, same chunked format
   undo/                the journal that makes undo possible
 ```
 
