@@ -1005,7 +1005,7 @@ alive and tested until M7.10 so the full gate is green at every commit.
 M6.2's headroom measurement gains a bounce clause that depends on M7.7
 (noted there).
 
-- [ ] M7.1 porta-dsp: split Flutter into FlutterModulator (wow osc +
+- [x] M7.1 porta-dsp: split Flutter into FlutterModulator (wow osc +
       flutter walk, emits a delay-in-samples value) + FlutterDelay
       (ring buffer + Catmull-Rom read); Flutter becomes a thin
       composition of one of each; add StereoFlutter (one modulator, two
@@ -1017,6 +1017,16 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       unmodified; StereoFlutter fed identical input on both channels
       produces identical outputs - shared modulation, directly;
       latency_samples unchanged)
+      Done 2026-08-23. The clamp constants live only in
+      FlutterModulator::new - both compositions construct through it,
+      so they can't drift by construction. Two new tests: the
+      identical-input one from the verify text, plus a stronger
+      mono-equivalence check (a StereoFlutter channel is bit-identical
+      to a mono Flutter with the same seed - guards both the refactor
+      and the shared constants; the delay-value sequence is the same
+      arithmetic in the same order). All existing flutter tests pass
+      unmodified; golden render byte-identical (the split is bit-exact,
+      no regen needed). Full gate green, all four feature combos.
 - [ ] M7.2 porta-dsp: split-chain builder on TapeCharacter - pre-
       flutter Chain [Saturation, Hiss, Bandwidth], shared
       StereoFlutter, post-flutter Chain ([Crush] if enabled, empty

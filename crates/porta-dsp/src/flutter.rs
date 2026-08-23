@@ -20,9 +20,13 @@ const CENTRE: usize = 480;
 /// Ring size: centre plus the largest excursion we allow, plus guard.
 const RING: usize = CENTRE * 2 + 8;
 
-pub struct Flutter {
-    ring: [f32; RING],
-    write: usize,
+/// The modulation half of flutter: the wow oscillator and the filtered
+/// random walk, producing a delay-in-samples value per sample. No audio
+/// passes through it - that's `FlutterDelay`'s job. Split out (change
+/// 001, M7.1) so a stereo bounce pass can share ONE modulation between
+/// two delay lines: the image wobbles together, as one transport would,
+/// instead of each channel drifting independently.
+pub struct FlutterModulator {
     /// Wow oscillator, in radians per sample.
     wow_phase: f32,
     wow_step: f32,
@@ -35,10 +39,13 @@ pub struct Flutter {
     seed: u32,
 }
 
-impl Flutter {
+impl FlutterModulator {
     /// `rate_hz` is the wow frequency (0.5-5Hz per the spec) and
     /// `depth_cents` the peak pitch deviation the two components reach
-    /// together.
+    /// together. The depth-clamp constants here are the delay-line
+    /// geometry's, shared by construction between `Flutter` and
+    /// `StereoFlutter` - they must never be redefined at either
+    /// composition site.
     pub fn new(rate_hz: f32, depth_cents: f32, seed: u32) -> Self {
         let seed = seed | 1;
         // Pitch deviation d cents on a sine of rate f needs a delay swing
@@ -47,8 +54,6 @@ impl Flutter {
         let ratio = 2f32.powf(depth_cents / 1200.0) - 1.0;
         let swing = ratio * SAMPLE_RATE as f32 / (core::f32::consts::TAU * rate_hz.max(0.01));
         Self {
-            ring: [0.0; RING],
-            write: 0,
             wow_phase: 0.0,
             wow_step: core::f32::consts::TAU * rate_hz / SAMPLE_RATE as f32,
             wow_depth: (swing * 0.7).min(CENTRE as f32 - 4.0),
@@ -60,16 +65,68 @@ impl Flutter {
         }
     }
 
-    /// Cassette defaults: 2.5Hz wobble, 12 cents deep.
-    pub fn cassette(seed: u32) -> Self {
-        Self::new(2.5, 12.0, seed)
-    }
-
     fn noise(&mut self) -> f32 {
         self.state ^= self.state << 13;
         self.state ^= self.state >> 17;
         self.state ^= self.state << 5;
         (self.state as f32 / u32::MAX as f32) * 2.0 - 1.0
+    }
+
+    /// Advance one sample and return the delay to read at - exactly the
+    /// arithmetic the pre-split `Flutter::process` ran per sample, in
+    /// the same order, so the composed result stays bit-identical.
+    fn next_delay(&mut self) -> f32 {
+        let wow = self.wow_phase.sin() * self.wow_depth;
+        self.wow_phase += self.wow_step;
+        if self.wow_phase > core::f32::consts::TAU {
+            self.wow_phase -= core::f32::consts::TAU;
+        }
+
+        // Random walk, gently low-passed and leaked back toward zero
+        // so it wanders without drifting away.
+        let n = self.noise();
+        self.walk = (self.walk + n * 0.02).clamp(-1.0, 1.0) * 0.9995;
+        self.walk_lp += 0.002 * (self.walk - self.walk_lp);
+        let flutter = self.walk_lp * self.flutter_depth;
+
+        CENTRE as f32 + wow + flutter
+    }
+
+    fn reset(&mut self) {
+        self.wow_phase = 0.0;
+        self.walk = 0.0;
+        self.walk_lp = 0.0;
+        self.state = self.seed;
+    }
+
+    fn reseed(&mut self, seed: u32) {
+        self.seed = seed | 1;
+        self.reset();
+    }
+}
+
+/// The audio half of flutter: a ring buffer plus the Catmull-Rom
+/// fractional read. No modulation state of its own - it reads wherever
+/// it's told to.
+pub struct FlutterDelay {
+    ring: [f32; RING],
+    write: usize,
+}
+
+impl FlutterDelay {
+    pub fn new() -> Self {
+        Self {
+            ring: [0.0; RING],
+            write: 0,
+        }
+    }
+
+    /// Write one sample, read back at `delay` samples, advance.
+    fn tick(&mut self, sample: f32, delay: f32) -> f32 {
+        self.ring[self.write] = sample;
+        let out = self.read(delay);
+        self.write = (self.write + 1) % RING;
+        out
     }
 
     /// Catmull-Rom interpolation of the ring at `delay` samples back.
@@ -89,49 +146,107 @@ impl Flutter {
         let c = -0.5 * y0 + 0.5 * y2;
         ((a * frac + b) * frac + c) * frac + y1
     }
+
+    fn reset(&mut self) {
+        self.ring = [0.0; RING];
+        self.write = 0;
+    }
+}
+
+impl Default for FlutterDelay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The mono flutter every ordinary track uses: one modulator driving
+/// one delay line. A thin composition of the two halves above - same
+/// behavior, same tests, nothing changes for tracks 1-4.
+pub struct Flutter {
+    modulator: FlutterModulator,
+    delay: FlutterDelay,
+}
+
+impl Flutter {
+    pub fn new(rate_hz: f32, depth_cents: f32, seed: u32) -> Self {
+        Self {
+            modulator: FlutterModulator::new(rate_hz, depth_cents, seed),
+            delay: FlutterDelay::new(),
+        }
+    }
+
+    /// Cassette defaults: 2.5Hz wobble, 12 cents deep.
+    pub fn cassette(seed: u32) -> Self {
+        Self::new(2.5, 12.0, seed)
+    }
 }
 
 impl AudioProcessor for Flutter {
     fn process(&mut self, block: &mut [f32]) {
         for s in block.iter_mut() {
-            self.ring[self.write] = *s;
-
-            let wow = self.wow_phase.sin() * self.wow_depth;
-            self.wow_phase += self.wow_step;
-            if self.wow_phase > core::f32::consts::TAU {
-                self.wow_phase -= core::f32::consts::TAU;
-            }
-
-            // Random walk, gently low-passed and leaked back toward zero
-            // so it wanders without drifting away.
-            let n = self.noise();
-            self.walk = (self.walk + n * 0.02).clamp(-1.0, 1.0) * 0.9995;
-            self.walk_lp += 0.002 * (self.walk - self.walk_lp);
-            let flutter = self.walk_lp * self.flutter_depth;
-
-            *s = self.read(CENTRE as f32 + wow + flutter);
-            self.write = (self.write + 1) % RING;
+            let delay = self.modulator.next_delay();
+            *s = self.delay.tick(*s, delay);
         }
     }
 
     fn reset(&mut self) {
-        self.ring = [0.0; RING];
-        self.write = 0;
-        self.wow_phase = 0.0;
-        self.walk = 0.0;
-        self.walk_lp = 0.0;
-        self.state = self.seed;
+        self.delay.reset();
+        self.modulator.reset();
     }
 
     /// Unlike `reset` (back to the seed this instance was built with),
     /// this takes a fresh one - what `record()` needs each pass (REQ-304)
     /// without reallocating a new `Flutter`.
     fn reseed(&mut self, seed: u32) {
-        self.seed = seed | 1;
-        self.reset();
+        self.delay.reset();
+        self.modulator.reseed(seed);
     }
 
     fn latency_samples(&self) -> usize {
+        CENTRE
+    }
+}
+
+/// Stereo flutter for a bounce pass (change 001, REQ-402): ONE
+/// modulator driving TWO delay lines. Each sample advances the
+/// modulator once and reads both channels at that one delay value -
+/// genuinely shared modulation, independent audio per channel. Not an
+/// `AudioProcessor` (that trait is mono, in-place, and stays that way -
+/// REQ-701/704); a bounce pass calls `process` directly between its
+/// per-channel chain halves.
+pub struct StereoFlutter {
+    modulator: FlutterModulator,
+    left: FlutterDelay,
+    right: FlutterDelay,
+}
+
+impl StereoFlutter {
+    pub fn new(rate_hz: f32, depth_cents: f32, seed: u32) -> Self {
+        Self {
+            modulator: FlutterModulator::new(rate_hz, depth_cents, seed),
+            left: FlutterDelay::new(),
+            right: FlutterDelay::new(),
+        }
+    }
+
+    /// Cassette defaults, matching `Flutter::cassette`.
+    pub fn cassette(seed: u32) -> Self {
+        Self::new(2.5, 12.0, seed)
+    }
+
+    /// Both channels through their own delay line at the same
+    /// modulation. Processes `min(l.len(), r.len())` samples - callers
+    /// hand in equal-length blocks; the min is defensive, not an API.
+    pub fn process(&mut self, l: &mut [f32], r: &mut [f32]) {
+        let n = l.len().min(r.len());
+        for i in 0..n {
+            let delay = self.modulator.next_delay();
+            l[i] = self.left.tick(l[i], delay);
+            r[i] = self.right.tick(r[i], delay);
+        }
+    }
+
+    pub fn latency_samples(&self) -> usize {
         CENTRE
     }
 }
@@ -237,5 +352,44 @@ mod tests {
     fn block_size_invariant() {
         let mut f = Flutter::cassette(9);
         assert_block_size_invariant(&mut f, &sine(997.0, -6.0, 8192));
+    }
+
+    #[test]
+    fn stereo_shares_one_modulation_between_channels() {
+        // Identical input on both channels must produce identical
+        // outputs - the whole point of one modulator, two delay lines.
+        // Different content per channel while the modulation is shared
+        // is exercised by the mono-equivalence test below (each channel
+        // there carries its own comparison independently).
+        let input = sine(440.0, -6.0, 48_000);
+        let mut l = input.clone();
+        let mut r = input.clone();
+        let mut sf = StereoFlutter::cassette(7);
+        for (cl, cr) in l.chunks_mut(512).zip(r.chunks_mut(512)) {
+            sf.process(cl, cr);
+        }
+        assert_eq!(
+            l, r,
+            "shared modulation must treat both channels identically"
+        );
+    }
+
+    #[test]
+    fn stereo_channel_matches_mono_flutter_exactly() {
+        // The split's whole safety argument: StereoFlutter is the same
+        // arithmetic as Flutter, per channel, in the same order - so a
+        // channel of it must be bit-identical to a mono Flutter with
+        // the same seed. Guards the refactor AND the shared-constant
+        // requirement (a drifted depth clamp would break this first).
+        let input = sine(330.0, -6.0, 48_000);
+        let mono = process_in_blocks(&mut Flutter::cassette(5), &input, 512);
+        let mut l = input.clone();
+        let mut r = input.clone();
+        let mut sf = StereoFlutter::cassette(5);
+        for (cl, cr) in l.chunks_mut(512).zip(r.chunks_mut(512)) {
+            sf.process(cl, cr);
+        }
+        assert_eq!(l, mono, "stereo left must match mono bit-exactly");
+        assert_eq!(sf.latency_samples(), CENTRE);
     }
 }
