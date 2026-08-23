@@ -2,9 +2,9 @@
 
 ## Motivation
 
-Requested directly by the owner while using the app, then reshaped six
-times after review found real design holes (see "History" at the end -
-this is now v7). The underlying problems are unchanged:
+Requested directly by the owner while using the app, then reshaped
+eight times after review found real design holes (see "History" at the
+end - this is now v9). The underlying problems are unchanged:
 
 1. **Stereo information is lost.** Today's bounce is a mono sum of
    tracks 1-3 onto track 4; anything panned comes out center.
@@ -28,7 +28,7 @@ on real hardware, every bounce costs you two tracks, permanently - that
 scarcity is part of what a 4-track forces you to commit to. This design
 trades that economics away in exchange for stereo imaging and repeatable
 layering, at a real, non-trivial memory cost (REQ-904 below more than
-doubles, ~700MB to ~1774MB steady-state, ~2.3GB worst-case peak while
+doubles, ~700MB to ~1774MB steady-state, ~2.8GB worst-case peak while
 undoing a bounce). That trade is the owner's to make, and it's being
 asked for directly here, not slipped in as a footnote. It is not "no
 cost, all upside," and this document stops framing it that way.
@@ -239,25 +239,38 @@ continuous through punch-out; tracks 1-4 re-appearing is not.**
 **The claim, worked out explicitly (a seventh review read an earlier,
 looser version of this paragraph as claiming something that doesn't
 hold, and re-deriving it precisely is the fix, not a change in
-mechanism)**: let `P(t)` be the print input at tape position `t`
-(REQ-406), `W(t) = Chain(P)(t)` the post-chain signal actually written
-there, and `g` the buss's own gain (held constant across the comparison
-- riding it is REQ-406's concern, not this one). *During* the pass, at
-the moment position `t` is being written, the monitor output is `g x
-W(t)` - the buss's `playback` slot is `W(t)` itself (this is the exact
-value being written to tape, reused, not recomputed), scaled by `g`
-through the ordinary `mix_block` path. *After* the pass closes, playing
-back that same, now-written position `t` reads `W(t)` off tape and
-scales it by `g` the same way ordinary playback always does: `g x
-W(t)`. Identical expression, same value, both times - the comparison
-that matters is "monitored live vs. replayed after," at the *same* tape
-position, not "during the pass vs. what that position would have
-sounded like un-bounced" (a different, uninteresting comparison this
-claim was never about). The one real caveat is the ~5ms smoothing ramp
-`g` itself rides on: right at punch-in, before the ramp has settled to
-`g`, the two won't match exactly - the same, already-accepted crossfade
-window every other punch boundary in this engine has, not something
-new.
+mechanism; an eighth review then found the re-derivation itself glossed
+over dither, corrected below)**: let `P(t)` be the print input at tape
+position `t` (REQ-406), `W(t) = Chain(P)(t)` the post-chain,
+pre-quantize signal, and `g` the buss's own gain (held constant across
+the comparison - riding it is REQ-406's concern, not this one). *During*
+the pass, at the moment position `t` is being written, the monitor
+output is `g x W(t)` - the buss's `playback` slot is `W(t)` itself (the
+same pre-dither value `RecordPass::write_block` is about to dither and
+quantize, reused rather than recomputed), scaled by `g` through the
+ordinary `mix_block` path. *After* the pass closes, playing back that
+same, now-written position `t` reads what's actually on tape -
+`quantize(dither(W(t)))`, not `W(t)` - and scales *that* by `g`:
+`g x quantize(dither(W(t)))`. **These are not bit-identical**; they
+differ by up to +/-0.5 LSB of TPDF dither noise, roughly -90dBFS at
+16-bit - inaudible, but a real difference this document was wrong to
+call "identical" for the seventh-review version above. This is not a
+new gap the buss introduces: it's the exact same approximation ordinary
+track monitoring already makes today (`self.playback[t] =
+self.processed[t]` at `engine.rs:333` runs *before*
+`pass.write_block`'s dither/quantize a few lines earlier, so REQ-305's
+own "the user hears what the tape receives" has always meant "receives,
+before dither" for tracks 1-4). REQ-408 inherits that same precision
+level rather than inventing a stricter or looser one - stated here
+explicitly so the "bit-identical" claim isn't left overstated. The
+comparison that matters is "monitored live vs. replayed after, within
+dither's noise floor," at the *same* tape position, not "during the
+pass vs. what that position would have sounded like un-bounced" (a
+different, uninteresting comparison this claim was never about). The
+other real caveat is the ~5ms smoothing ramp `g` itself rides on: right
+at punch-in, before the ramp has settled to `g`, the two won't match
+even to that tolerance - the same, already-accepted crossfade window
+every other punch boundary in this engine has, not something new.
 
 **Tick-once, not twice, per sample (a sixth review caught this)**: the
 buss's smoothed gain is needed at two points for one sample - once
@@ -534,17 +547,26 @@ restore logic follows.
   mechanism a payload belongs to)**: `Journal`'s per-track give-back
   array (`chunk_pool: [Vec<Vec<i16>>; NUM_TRACKS]`) and the buss's
   double-buffered reserve are two genuinely separate mechanisms, not
-  one array both share, indexed by a "virtual track number" that could
-  exceed `NUM_TRACKS` and panic against `Tape`'s own 4-element track
-  array too. `pending_writes`'s entries need an explicit tag alongside
+  one array both share, indexed by a "virtual track number." **Worth
+  getting the failure mode right (an eighth review corrected this):**
+  `Tape.tracks` is a `Vec<Track>`, not a fixed-size array - an earlier
+  version of this paragraph said an out-of-range index would "panic
+  against Tape's own 4-element track array," which overstates how safe
+  the naive approach actually is. A `Vec` is happy to grow past
+  `NUM_TRACKS`; appending a 5th/6th slot to it for the buss wouldn't
+  panic at all. What actually happens is worse: every existing loop
+  that walks tracks by `0..NUM_TRACKS` (the constant, not
+  `tracks.len()`) - and that's most of the codebase - would simply never
+  iterate that far, so the buss's slot would sit there, correctly
+  written, silently un-read by anything, with nothing failing loudly to
+  catch it. `pending_writes`'s entries need an explicit tag alongside
   the id (e.g. `Track(usize)` vs `Buss`, not a bare `usize` overloaded
   to sometimes mean "index past the real tracks") so
   `push_pass`/`evict`/`flush_pending` can route each payload's give-back
   to the right mechanism without guessing from the number alone. Same
   tag resolves how `Tape` itself addresses the buss's storage: it needs
-  its own field (or a small enum alongside the 4-element track array),
-  not a 5th/6th slot appended to that array under an index tracks-only
-  code was never written to expect.
+  its own field (or a small enum alongside `tracks`), not an appended
+  element indexed by anything `0..NUM_TRACKS` code would silently skip.
 
 ### Session-script support (REQ-804)
 
@@ -663,12 +685,31 @@ here. Four new ops, matching the shape of what's already there:
     the track's reserve (the same plain move `flush_pending` already
     uses once chunks are actually written), an already-flushed one still
     queues for file deletion. New regression test: evicting a still-
-    pending entry recovers its chunk rather than losing it. The
-    remaining, smaller container-growth risk in these same functions
-    (`Vec<Entry>`/`Vec<(u64, usize, Vec<Vec<i16>>)>` growing their own
-    outer capacity) is unaddressed and accepted, same reasoning as
-    before: small, pointer-sized, not bulk sample data, not made
-    categorically worse by this proposal.
+    pending entry recovers its chunk rather than losing it.
+    **That first fix had its own residual gap, found by an eighth
+    review and also already fixed**: `reclaim_chunks` (the function
+    `release_entry_payload` and `flush_pending` both funnel through)
+    still dropped a chunk in place whenever it didn't fit back into the
+    track's reserve - fine when the caller is `flush_pending` (already
+    off the realtime thread), a real deallocation-on-thread when the
+    caller is `release_entry_payload` via `evict`/`push_pass`'s redo
+    invalidation. Reachable: an entry whose pass ran past its reserve
+    and fell back to ordinary allocation for the overflow (see
+    `CHUNK_POOL_PER_TRACK`'s own doc comment - this is documented,
+    accepted behavior for the *allocation*, not for what happens to
+    those chunks later), evicted or redo-invalidated while still
+    pending. Fixed by adding `Journal.pending_frees` - whatever
+    `reclaim_chunks` can't return to a reserve is parked there instead
+    of dropped, and `flush_pending` (the one call site guaranteed to be
+    off the realtime thread) is where the actual deallocation happens,
+    at the end of its own loop. New regression test: reclaiming more
+    chunks than a reserve holds parks the excess rather than dropping it
+    immediately, and `flush_pending` is what clears it.
+    The remaining, smaller container-growth risk in these same functions
+    (`Vec<Entry>`/`Vec<(u64, usize, Vec<Vec<i16>>)>`/`pending_frees`
+    growing their own outer capacity) is unaddressed and accepted, same
+    reasoning as before: small, pointer-sized, not bulk sample data, not
+    made categorically worse by this proposal.
   - **Not yet done, flagged by the fourth review as the way to make this
     invariant load-bearing rather than inferred from passing tests**: a
     global-allocator-backed counting harness around `record()`/
@@ -703,6 +744,61 @@ here. Four new ops, matching the shape of what's already there:
   `{"op":"bounce"}` (`tests/golden.rs`, `tests/cli.rs:208`) - one
   regeneration event, one TASKS.md note, one notification, covering
   both causes.
+  - **This is two distinct pre-master sums, not one - an eighth review
+    found the paragraph above (inherited unchanged from earlier
+    versions) never says so, and REQ-406 and REQ-408 need opposite
+    things from tracks 1-4 during an open bounce pass, so a single sum
+    can't serve both.** REQ-406's print input `P(t)` needs tracks 1-4's
+    *full* fader/pan/mute-scaled contribution, unconditionally - that's
+    the entire point of printing their current mix. REQ-408 needs
+    tracks 1-4's contribution *excluded* from what reaches speakers,
+    export, and the buss's own playback path, to avoid the +6dB
+    double-sum - that's what the "excluded from the sum, still metered"
+    flag two bullets below is for. One flag cannot mean both "in" and
+    "out" of the same sum at once; the fix is to stop trying and expose
+    two:
+    - **`mix_block`'s existing pre-master sum** (call it the *monitor
+      sum* - what already exists today, extended only by the exclude
+      flag) stays exactly what it is: every track's contribution gated
+      by that flag (full weight ordinarily, zero while a bounce pass
+      has it set), plus the buss's own contribution via its `playback`
+      slot at its own smoothed fader/mute (REQ-408 - during a bounce
+      this slot holds the freshly-printed `W(t)`, same as any other
+      time it holds whatever the buss is currently playing). This feeds
+      `out_l`/`out_r`, meters (modulo the flag's own carve-out, see
+      below), and export - unchanged in shape from today, it just now
+      also sums in a fifth (buss) contributor.
+    - **A second, new pre-master sum** (the *print sum*) is tracks 1-4
+      only, at full fader/pan/mute weight, **never gated by the exclude
+      flag** - the flag is specifically about audibility, not about
+      whether a track feeds the print. This sum only needs computing
+      while a bounce pass is open; `mix_block` can either always compute
+      it (cheap - it's the same per-sample multiply-accumulate the
+      monitor sum already does, just against a different mask) or gate
+      the extra work on "is a bounce pass open," an implementation
+      choice with no behavioral difference. The buss's own term of
+      `P(t)` - its *prior*, pre-bounce content at this position,
+      REQ-407's read-before-write - is deliberately **not** part of this
+      sum: it comes from the same tape-read mechanism `RecordPass`
+      already uses to capture displaced content for undo, not from the
+      mixer's `playback` array (which, at the moment this block is being
+      mixed, may already hold the *new* printed value depending on
+      ordering - reading the old value has to come from tape, not from
+      mixer state that could have already moved on). The caller (the
+      bounce pass driver in `engine.rs`, alongside where `RecordPass`
+      captures its displaced-content snapshot) adds that tape-read term,
+      scaled by the buss's own tick-once-shared smoothed gain (see the
+      per-block scratch buffer described further below), to get the
+      full `P(t)` that feeds the character chain. `mix_block` itself
+      never needs to know about the buss's prior content - only about
+      summing tracks 1-4 twice, once gated and once not.
+    - Stated plainly since it's easy to lose in the mechanism: **the
+      "excluded from the sum, still metered" flag applies to the
+      monitor sum only.** The print sum's whole purpose is to *not*
+      exclude anything - a track marked excluded is still summed there
+      at full weight. Metering (a third, independent read already
+      described below) is unaffected either way - it comes from
+      `input * fader_amp` regardless of which sum(s) that value feeds.
 - **The existing bounce test suite, named explicitly (a seventh review
   found it missing from this list entirely)**:
   `crates/porta-engine/tests/bounce.rs` is a whole file of tests built
@@ -724,7 +820,26 @@ here. Four new ops, matching the shape of what's already there:
   directly, exactly the `Command::Bounce` path this proposal removes.
   Once the buss lands, that button's handler becomes "arm the buss,
   then Record" (REQ-404/405) instead of one blocking call - a real UI
-  behavior change on top of the engine one, not free.
+  behavior change on top of the engine one, not free. Two more
+  interactions an eighth review flagged, non-blocking today (this
+  proposal isn't implemented yet, so neither is false *yet*) but real
+  once it is, so noted here rather than rediscovered later:
+  - `ui.rs`'s `LiveState` doc comment currently asserts "this UI is the
+    only source of [arm/fader/pan/master] commands (true today)",
+    which is exactly why `Backend::send` sets `LiveState.armed`
+    optimistically at send time instead of waiting for an echo back
+    from the audio thread. REQ-405's auto-clear (arming the buss clears
+    all 4 tracks' armed state, and vice versa, inside the engine) would
+    make that assertion false the moment it lands: the engine would be
+    a second source of arm-state changes the UI's mirror never sees.
+    Whoever implements REQ-405 needs to either echo that auto-clear back
+    through an `EngineEvent` the UI mirrors, or accept a stale
+    `LiveState.armed` display until the next full resync - a real choice
+    to make then, not assumed here.
+  - REQ-409 (the buss's own fader/mute) has no UI surface at all yet -
+    the Tapes view's Bounce button only reaches arm+Record, nothing
+    reaches the buss's fader or mute. Not a blocker for landing the
+    engine side, but the feature isn't usable end-to-end without it.
 - **`Mixer` also needs a per-track "excluded from the sum, still
   metered" flag** for REQ-408's metering clause (`mix_block` currently
   derives a track's meter peak from the same slice that feeds the sum,
@@ -912,10 +1027,14 @@ here. Four new ops, matching the shape of what's already there:
   has converged), and bounce a short region. Capture the monitor output
   *live, during* the pass, for a stretch clear of the punch-in crossfade
   window. Separately, after the pass closes, seek back and *play back
-  that same tape region* fresh. Assert the two captures are
-  bit-identical (or within a tiny float tolerance) - this is "monitored
-  live vs. replayed after, same position," not "during the pass vs.
-  what that position would have sounded like un-bounced." A second,
+  that same tape region* fresh. Assert the two captures match within
+  dither's noise floor (an eighth review found "bit-identical" doesn't
+  actually hold - see "Monitoring" above's worked-out claim; a tolerance
+  around +/-1 LSB at 16-bit, roughly -90dBFS, is the honest bound, not
+  a proxy for "close enough" but the actual TPDF dither error this
+  document now derives) - this is "monitored live vs. replayed after,
+  same position," not "during the pass vs. what that position would
+  have sounded like un-bounced." A second,
   independent assertion: each track's own meter still reflects its live
   signal during the pass rather than reading silent (REQ-408's metering
   clause).
@@ -1211,7 +1330,7 @@ testkit helper, an unreachable REQ-905 fallback, an asymmetric-range
 issue in the clamp test, an overclaimed "mathematically identical" for
 the master refactor).
 
-**v8 (this revision)**: the eviction/redo-invalidation leak is fixed
+**v8**: the eviction/redo-invalidation leak is fixed
 for real this time, in shipped code, the same day it was found - one
 shared `release_entry_payload` used by both call sites, with its own
 regression test; the proposal now describes it as landed, not planned.
@@ -1231,5 +1350,46 @@ directly - see `TASKS.md`) are all named as needing to change.
 REQ-603 is specified as deleted, not reworded. The remaining smaller
 gaps (buss `Tape` addressing, the correlation-coefficient helper, the
 REQ-905 fallback's timing, the clamp test's asymmetric-range issue, the
-master refactor's steady-state-only claim) are all addressed. Ready for
-an eighth spec-reviewer pass.
+master refactor's steady-state-only claim) are all addressed.
+
+**v9 (this revision)**: an eighth review found the Motivation section's
+peak-memory summary line still said the stale ~2.3GB figure from v7
+after v8 corrected the detailed section to ~2.8GB - fixed, and this
+document is now the second recorded instance of that exact mistake
+(round 6 also let a corrected narrative leave a stale normative bullet
+standing) - worth treating as a standing failure mode, not a one-off:
+after any numeric or rule correction, grep the whole document for the
+old value, don't trust that fixing one section propagates. The
+`Mixer::mix_block` bullet's single "pre-master intermediate sum" was
+found to be genuinely ambiguous, not just imprecisely worded: REQ-406
+needs tracks 1-4's *full* contribution to feed the print, REQ-408 needs
+their contribution *excluded* from what's audible, during the same
+bounce pass - one sum cannot mean both. Resolved by specifying two
+distinct pre-master sums (the existing monitor sum, gated by the
+"excluded from sum, still metered" flag; a new print sum, tracks 1-4
+only, never gated by that flag) and stating explicitly which one the
+flag applies to. REQ-408's central claim was found to still overclaim:
+"the buss's `playback` slot holds `W(t)`... reads `W(t)` off tape" skips
+that what's actually on tape is `quantize(dither(W(t)))`, not `W(t)`
+itself - re-derived to state the honest bound (matches within TPDF
+dither's noise floor, roughly +/-1 LSB / -90dBFS at 16-bit, not
+bit-identical), and noted this is the same approximation REQ-305
+already makes for ordinary track monitoring today, not a new gap the
+buss introduces. The eviction fix's own `reclaim_chunks` was found to
+still drop overflow chunks (beyond a track's `CHUNK_POOL_PER_TRACK`) in
+place when called from the realtime-reachable `release_entry_payload`
+path - fixed in shipped code the same way the original leak was: a new
+`Journal.pending_frees` list parks what doesn't fit, and `flush_pending`
+(always off the realtime thread) is where those chunks actually drop,
+with its own regression test. Three smaller items also addressed: the
+version-count line at the top of this document was stale since v8 (said
+"six times... v7"); the "4-element track array" wording was corrected
+(`Tape.tracks` is a `Vec`, so an out-of-range append wouldn't panic -
+it would silently go unread by any `0..NUM_TRACKS` loop, a worse
+failure mode than the one originally described); and the UI's Bounce
+button bullet now names its two forward-looking interactions with this
+proposal (REQ-405's auto-clear would make `ui.rs`'s current "only
+source of arm state" doc comment false once implemented; REQ-409 has no
+UI surface yet), flagged as real but not blocking since neither is
+false until this proposal actually ships. Ready for a ninth
+spec-reviewer pass.
