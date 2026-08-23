@@ -1,0 +1,49 @@
+name: Deploy site
+
+# Publishes site/ (see site/*.md) as a GitHub Pages site on every
+# tagged release, same trigger as release.yml's build matrix. Built
+# with Jekyll for now, since it needs no extra gems beyond GitHub
+# Pages' own supported set - meant to migrate to the owner's own
+# Slartibartfast generator once that's published; site/_config.yml
+# notes this too.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; let an in-flight one finish
+# rather than cancelling it mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/jekyll-build-pages@v1
+        with:
+          source: site
+          destination: _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

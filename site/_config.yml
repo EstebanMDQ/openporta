@@ -1,0 +1,10 @@
+title: openporta
+description: A software emulation of a 4-track cassette portastudio.
+baseurl: /openporta
+url: https://estebanmdq.github.io
+theme: jekyll-theme-cayman
+markdown: kramdown
+
+# Interim: built with Jekyll (GitHub Pages' own supported theme set,
+# no extra gems to bundle) until Slartibartfast is published and this
+# migrates over to it instead.
