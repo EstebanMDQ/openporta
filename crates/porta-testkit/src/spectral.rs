@@ -67,3 +67,64 @@ pub fn thd_db(signal: &[f32], fundamental_hz: f32, n_harmonics: usize) -> f32 {
         .sum();
     10.0 * (harm.max(1e-20) / fund).log10()
 }
+
+/// Pearson correlation between two equal-length signals, in [-1, 1].
+///
+/// For asking whether two channels carry *related* content rather than
+/// merely similar levels: independently seeded hiss correlates near 0
+/// however loud it is, while one signal duplicated into both channels
+/// correlates at 1. Returns 0 for empty or constant input (no variance
+/// to correlate), which reads as "unrelated" - the safe answer for a
+/// decorrelation assertion.
+pub fn pearson(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let mean_a = a[..n].iter().sum::<f32>() / n as f32;
+    let mean_b = b[..n].iter().sum::<f32>() / n as f32;
+    let (mut cov, mut var_a, mut var_b) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..n {
+        let da = (a[i] - mean_a) as f64;
+        let db = (b[i] - mean_b) as f64;
+        cov += da * db;
+        var_a += da * da;
+        var_b += db * db;
+    }
+    if var_a <= 0.0 || var_b <= 0.0 {
+        return 0.0;
+    }
+    (cov / (var_a.sqrt() * var_b.sqrt())) as f32
+}
+
+#[cfg(test)]
+mod pearson_tests {
+    use super::pearson;
+    use crate::signal::{sine, white_noise};
+
+    #[test]
+    fn identical_signals_correlate_at_one() {
+        let s = sine(440.0, -6.0, 4800);
+        assert!((pearson(&s, &s) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn inverted_signals_correlate_at_minus_one() {
+        let s = sine(440.0, -6.0, 4800);
+        let inv: Vec<f32> = s.iter().map(|x| -x).collect();
+        assert!((pearson(&s, &inv) + 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn independently_seeded_noise_is_uncorrelated() {
+        let a = white_noise(1, -20.0, 48_000);
+        let b = white_noise(2, -20.0, 48_000);
+        assert!(pearson(&a, &b).abs() < 0.05, "got {}", pearson(&a, &b));
+    }
+
+    #[test]
+    fn constant_or_empty_input_reads_as_unrelated() {
+        assert_eq!(pearson(&[], &[]), 0.0);
+        assert_eq!(pearson(&[1.0; 100], &[1.0; 100]), 0.0);
+    }
+}

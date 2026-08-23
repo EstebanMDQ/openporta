@@ -1337,7 +1337,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       (each generation adds ~480 samples of flutter delay - accepted
       drift, deliberately not asserted against). Added a
       bounce-path reproducibility test alongside. Full gate green.
-- [ ] M7.12 porta-engine acceptance tests (+ a Pearson correlation
+- [x] M7.12 porta-engine acceptance tests (+ a Pearson correlation
       helper in porta-testkit beside band_energy_db, not inline in a
       test): stereo image - hard-left source, bounce twice, right
       channel's band energy in the source range stays >= 10dB below
