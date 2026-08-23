@@ -21,13 +21,18 @@ openporta - 4-track cassette portastudio
 usage:
   porta-app new <dir> [--minutes N] [--seed N] [--character cassette|clean]
   porta-app script <file.json>
-  porta-app render <dir> --out <file.wav|file.mp3> [--seconds N] [--bits 16|24]
-  porta-app export <dir> --out <file.wav|file.mp3> [--seconds N] [--bits 16|24]
+  porta-app render <dir> --out <file.wav|mp3|mp4> [--seconds N] [--bits 16|24]
+                         [--image <file>]
+  porta-app export <dir> --out <file.wav|mp3|mp4> [--seconds N] [--bits 16|24]
+                         [--image <file>]
 
 render and export are the same thing: a stereo mixdown of the whole tape
 from the start, or of the first N seconds. Format follows --out's own
 extension: .wav is the master (lossless, --bits 16 or 24), .mp3 is the
-convenience format to share (fixed 192kbps, --bits doesn't apply).
+convenience format to share (fixed 192kbps, --bits doesn't apply), .mp4
+pairs the mix with a single still image (--image, required) into a
+video ready to upload anywhere that takes one - shells out to ffmpeg,
+which must be installed separately (not bundled).
 
 built with --features realtime:
   porta-app devices
@@ -95,16 +100,19 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// WAV (the master format - lossless, tunable bit depth) or MP3 (the
-/// share format - one fixed convenience bitrate, see MP3_BITRATE_KBPS)
-/// picked from --out's own extension, not a separate flag: an output
-/// path already says what it wants to be.
+/// WAV (the master format - lossless, tunable bit depth), MP3 (the
+/// share format - one fixed convenience bitrate, see MP3_BITRATE_KBPS),
+/// or MP4 (a still image plus the mix, via --image - see
+/// render::write_video) picked from --out's own extension, not a
+/// separate flag: an output path already says what it wants to be.
 fn cmd_render(args: &[String]) -> Result<(), String> {
     let dir = args.first().ok_or("render needs a project directory")?;
     let out = flag(args, "--out").ok_or("render needs --out <file.wav>")?;
-    let is_mp3 = Path::new(out)
+    let ext = Path::new(out)
         .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mp3"));
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let depth = match flag(args, "--bits") {
         None => BitDepth::Sixteen,
         Some(b) => BitDepth::parse(b).ok_or_else(|| format!("--bits expects 16 or 24, got {b}"))?,
@@ -118,9 +126,13 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
     engine.seek(0);
     let (l, r) = render::mixdown(&mut engine, samples);
     let seconds = l.len() as f32 / porta_engine::SAMPLE_RATE as f32;
-    if is_mp3 {
+    if ext == "mp3" {
         render::write_mp3(out, &l, &r).map_err(|e| e.to_string())?;
         println!("wrote {out} ({seconds:.1}s, mp3)");
+    } else if ext == "mp4" {
+        let image = flag(args, "--image").ok_or("render --out *.mp4 needs --image <file>")?;
+        render::write_video(out, image, &l, &r).map_err(|e| e.to_string())?;
+        println!("wrote {out} ({seconds:.1}s, mp4)");
     } else {
         render::write_wav(out, &l, &r, depth).map_err(|e| e.to_string())?;
         println!(

@@ -24,6 +24,8 @@ pub enum ScriptError {
     Wav(#[from] hound::Error),
     #[error("track {0} is out of range")]
     BadTrack(usize),
+    #[error(transparent)]
+    Video(#[from] render::VideoError),
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -81,6 +83,13 @@ pub enum Op {
         out: String,
         #[serde(default)]
         bits: Option<String>,
+    },
+    /// Same captured mixdown as `export`, paired with a single still
+    /// `image` into an MP4 (render::write_video) - shells out to
+    /// ffmpeg, a real external dependency, not bundled.
+    ExportVideo {
+        out: String,
+        image: String,
     },
 }
 
@@ -220,6 +229,13 @@ impl Runner {
                     .unwrap_or(BitDepth::Sixteen);
                 let path = self.path(out);
                 render::write_wav(&path, &self.captured.0, &self.captured.1, depth)?;
+                self.captured.0.clear();
+                self.captured.1.clear();
+            }
+            Op::ExportVideo { out, image } => {
+                let path = self.path(out);
+                let image = self.path(image);
+                render::write_video(&path, &image, &self.captured.0, &self.captured.1)?;
                 self.captured.0.clear();
                 self.captured.1.clear();
             }

@@ -126,6 +126,86 @@ pub fn write_mp3(path: impl AsRef<Path>, l: &[f32], r: &[f32]) -> Result<(), Mp3
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum VideoError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Wav(#[from] hound::Error),
+    #[error(
+        "ffmpeg not found on PATH - video export shells out to it rather than \
+         bundling a video encoder; install it (e.g. `brew install ffmpeg` or \
+         `apt install ffmpeg`) and try again"
+    )]
+    FfmpegMissing,
+    #[error("ffmpeg exited with an error:\n{0}")]
+    FfmpegFailed(String),
+}
+
+/// Combine a single still `image` with the already-mixed audio (`l`/`r`)
+/// into an MP4 - the standard "static image + audio" recipe most video
+/// platforms, including YouTube, accept directly. Not a new video
+/// encoder written for this: shells out to `ffmpeg`, an explicit,
+/// checked-for external dependency (not bundled into releases), the
+/// same reasoning that already applies to MP3 being a convenience
+/// format on top of the WAV master.
+///
+/// Writes the mix to a temporary WAV next to `path` (ffmpeg needs a
+/// real audio *file*, not in-process samples) and removes it
+/// afterward, success or failure - `path` itself is the only output
+/// this function is meant to leave behind.
+pub fn write_video(
+    path: impl AsRef<Path>,
+    image: impl AsRef<Path>,
+    l: &[f32],
+    r: &[f32],
+) -> Result<(), VideoError> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let temp_wav = path.with_extension("tmp.wav");
+    write_wav(&temp_wav, l, r, BitDepth::Sixteen)?;
+
+    let result = run_ffmpeg(&temp_wav, image.as_ref(), path);
+    let _ = std::fs::remove_file(&temp_wav);
+    result
+}
+
+fn run_ffmpeg(audio: &Path, image: &Path, out: &Path) -> Result<(), VideoError> {
+    use std::process::Command;
+    let output = Command::new("ffmpeg")
+        .args(["-y", "-loop", "1", "-i"])
+        .arg(image)
+        .args(["-i"])
+        .arg(audio)
+        .args([
+            "-c:v",
+            "libx264",
+            "-tune",
+            "stillimage",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+        ])
+        .arg(out)
+        .output();
+    match output {
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(VideoError::FfmpegFailed(
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(VideoError::FfmpegMissing),
+        Err(e) => Err(VideoError::Io(e)),
+    }
+}
+
 pub fn read_wav_mono(path: impl AsRef<Path>) -> Result<Vec<f32>, hound::Error> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();

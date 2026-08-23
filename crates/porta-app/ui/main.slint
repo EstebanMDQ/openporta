@@ -213,6 +213,7 @@ export component MainWindow inherits Window {
     callback bounce-pressed();
     callback export-pressed();
     callback export-mp3-pressed();
+    callback export-video-pressed();
     callback new-pressed();
     callback load-pressed();
     callback connect-pressed();
@@ -265,6 +266,9 @@ export component MainWindow inherits Window {
     // while Playing to punch in; Play again punches out and keeps
     // rolling, Stop punches out and halts - the same buttons above.
     in-out property <string> export-path: "export.wav";
+    // No default - there's no cover art to fall back to; blank means
+    // "nothing picked yet," checked explicitly before shelling out.
+    in-out property <string> video-image-path: "";
 
     // Aliases so Rust can read/set each strip's state and connect its
     // callbacks from the root - the strips themselves are instantiated
@@ -520,6 +524,18 @@ export component MainWindow inherits Window {
                     }
                     TactileButton { text: "Export WAV"; clicked => { export-pressed(); } }
                     TactileButton { text: "Export MP3"; clicked => { export-mp3-pressed(); } }
+                }
+                // A still image plus the mix, as an MP4 - ready to
+                // upload anywhere that takes video. Shares export-path
+                // (extension swapped to .mp4, same as MP3 swaps to
+                // .mp3) - only the image needs its own field.
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> video-image-path;
+                        placeholder-text: "cover image path";
+                    }
+                    TactileButton { text: "Export Video"; clicked => { export-video-pressed(); } }
                 }
 
                 TactileButton {

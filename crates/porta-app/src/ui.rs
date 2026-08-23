@@ -625,6 +625,24 @@ pub fn run(dir: &str, kiosk: bool) -> Result<(), String> {
             refresh(&ui, &slot.as_ref().unwrap().snapshot());
         });
     }
+    {
+        let backend = Rc::clone(&backend);
+        let ui_weak = ui.as_weak();
+        ui.on_export_video_pressed(move || {
+            let Some(ui) = ui_weak.upgrade() else {
+                return;
+            };
+            let cassette_path = ui.get_cassette_path().to_string();
+            let image_path = ui.get_video_image_path().to_string();
+            let video_path = video_export_path(ui.get_export_path().as_ref());
+            let mut slot = backend.borrow_mut();
+            let status = with_engine(&mut slot, &cassette_path, |engine| {
+                export_video(engine, &image_path, &video_path)
+            });
+            ui.set_status_text(status.into());
+            refresh(&ui, &slot.as_ref().unwrap().snapshot());
+        });
+    }
 
     let timer = slint::Timer::default();
     {
@@ -1266,6 +1284,33 @@ fn export_mp3(engine: &mut Engine, path: &str) -> String {
     }
 }
 
+/// Same base name/location as the WAV export path, extension swapped
+/// to .mp4 - matches `mp3_export_path`'s reasoning exactly.
+fn video_export_path(wav_export_path: &str) -> String {
+    std::path::Path::new(wav_export_path)
+        .with_extension("mp4")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Export the whole tape from the top as an MP4 - a single still image
+/// paired with the mix, the standard "static image + audio" recipe
+/// most video platforms accept directly (see render::write_video).
+/// `image` is a required path to that still, not optional - there is
+/// no default cover art to fall back to.
+fn export_video(engine: &mut Engine, image: &str, path: &str) -> String {
+    if image.trim().is_empty() {
+        return "video export needs an image path".to_string();
+    }
+    engine.seek(0);
+    let len = engine.manifest().len_samples;
+    let (l, r) = crate::render::mixdown(engine, len);
+    match crate::render::write_video(path, image, &l, &r) {
+        Ok(()) => format!("exported to {path}"),
+        Err(e) => format!("export failed: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1437,6 +1482,88 @@ mod tests {
             0xE0,
             "should start with an MPEG frame sync"
         );
+    }
+
+    /// `ffmpeg` isn't guaranteed present on every machine that runs
+    /// this test suite (it's a real, external, checked-for dependency,
+    /// see `render::write_video`'s doc comment), so skip rather than
+    /// fail where it's missing, same reasoning any hardware-dependent
+    /// test in this codebase already uses.
+    fn have_ffmpeg() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .is_ok()
+    }
+
+    #[test]
+    fn export_video_writes_a_real_video_file() {
+        if !have_ffmpeg() {
+            eprintln!("skipping: ffmpeg not on PATH");
+            return;
+        }
+        let dir = TempDir::new("export-video");
+        let mut engine = Engine::create(&dir.0, 4_800, 1).unwrap();
+        // Generate the test fixture image with ffmpeg itself, rather
+        // than hand-rolling image bytes - if this fails, so would the
+        // real feature, for the same underlying reason.
+        let image = dir.0.join("cover.png");
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=64x64",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&image)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "failed to generate the test fixture image"
+        );
+
+        let out = dir.0.join("out.mp4");
+        let result = export_video(&mut engine, image.to_str().unwrap(), out.to_str().unwrap());
+        assert!(result.starts_with("exported to"), "got: {result}");
+        assert!(out.exists(), "export_video should have written a file");
+        // A real MP4 container structure, not just a file with the
+        // right name - the ftyp box is the very first thing in any
+        // valid MP4/mov-family file.
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(
+            bytes.len() > 1000,
+            "video file suspiciously small: {} bytes",
+            bytes.len()
+        );
+        assert_eq!(&bytes[4..8], b"ftyp", "should be a real MP4 container");
+        // The temp WAV write_video uses internally must not survive it.
+        assert!(
+            !dir.0.join("out.tmp.wav").exists(),
+            "temp WAV should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn export_video_without_an_image_path_fails_cleanly() {
+        let dir = TempDir::new("export-video-no-image");
+        let mut engine = Engine::create(&dir.0, 4_800, 1).unwrap();
+        let out = dir.0.join("out.mp4");
+        let status = export_video(&mut engine, "", out.to_str().unwrap());
+        assert!(status.contains("needs an image"), "got: {status}");
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn video_export_path_swaps_the_extension() {
+        assert_eq!(
+            video_export_path("/Users/me/takes/export.wav"),
+            "/Users/me/takes/export.mp4"
+        );
+        assert_eq!(video_export_path("relative/take"), "relative/take.mp4");
     }
 
     #[test]
