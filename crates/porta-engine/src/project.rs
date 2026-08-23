@@ -12,7 +12,7 @@
 //! than the whole tape. Callers must only save while stopped.
 
 use crate::mixer::Mixer;
-use crate::tape::{Tape, CHUNK_SAMPLES};
+use crate::tape::{BusChannel, Tape, CHUNK_SAMPLES};
 use crate::NUM_TRACKS;
 use porta_dsp::character::TapeCharacter;
 use std::fs;
@@ -45,6 +45,17 @@ pub struct Manifest {
     /// existed) still loads, unmuted.
     #[serde(default)]
     pub muted: [bool; NUM_TRACKS],
+    /// The bounce bus's own fader/mute (REQ-409). Mix decisions,
+    /// persisted for the same reason the per-track ones are - and this
+    /// one matters more than most: the bus's mute is load-bearing on
+    /// the next bounce (a muted bus prints without folding its prior
+    /// content forward), so silently forgetting it across a reopen
+    /// would change what the next bounce does. `#[serde(default)]`, so
+    /// a pre-bus cassette loads at unity and unmuted.
+    #[serde(default)]
+    pub bounce_fader_db: f32,
+    #[serde(default)]
+    pub bounce_muted: bool,
 }
 
 impl Manifest {
@@ -62,6 +73,8 @@ impl Manifest {
             pan: [0.0; NUM_TRACKS],
             master_db: 0.0,
             muted: [false; NUM_TRACKS],
+            bounce_fader_db: 0.0,
+            bounce_muted: false,
         }
     }
 
@@ -72,6 +85,8 @@ impl Manifest {
             mixer.set_muted(t, self.muted[t]);
         }
         mixer.set_master_db(self.master_db);
+        mixer.set_bus_fader_db(self.bounce_fader_db);
+        mixer.set_bus_muted(self.bounce_muted);
     }
 
     pub fn capture_from(&mut self, mixer: &Mixer) {
@@ -81,6 +96,8 @@ impl Manifest {
             self.muted[t] = mixer.is_muted(t);
         }
         self.master_db = mixer.master_db();
+        self.bounce_fader_db = mixer.bus_fader_db();
+        self.bounce_muted = mixer.is_bus_muted();
     }
 }
 
@@ -91,6 +108,14 @@ pub struct Project {
 
 fn track_path(dir: &Path, track: usize) -> PathBuf {
     dir.join("tape").join(format!("track{track}.raw"))
+}
+
+fn bus_path(dir: &Path, channel: BusChannel) -> PathBuf {
+    let name = match channel {
+        BusChannel::Left => "bounce_l.raw",
+        BusChannel::Right => "bounce_r.raw",
+    };
+    dir.join("tape").join(name)
 }
 
 impl Project {
@@ -113,6 +138,10 @@ impl Project {
         fs::create_dir_all(dir.join("undo"))?;
         for t in 0..NUM_TRACKS {
             let f = fs::File::create(track_path(&dir, t))?;
+            f.set_len((len_samples * 2) as u64)?;
+        }
+        for channel in BusChannel::BOTH {
+            let f = fs::File::create(bus_path(&dir, channel))?;
             f.set_len((len_samples * 2) as u64)?;
         }
         let project = Self {
@@ -164,6 +193,32 @@ impl Project {
             }
             tape.clear_dirty(t);
         }
+        for channel in BusChannel::BOTH {
+            let dirty = tape.bus_dirty_chunks(channel);
+            if dirty.is_empty() {
+                continue;
+            }
+            // A cassette created before the bus existed has no file to
+            // open - create it on first write rather than failing a
+            // save (REQ-801's missing-file rule, write side).
+            let path = bus_path(&self.dir, channel);
+            if !path.exists() {
+                let f = fs::File::create(&path)?;
+                f.set_len((self.manifest.len_samples * 2) as u64)?;
+            }
+            let mut f = fs::OpenOptions::new().write(true).open(path)?;
+            for c in dirty {
+                let data = tape.bus_chunk(channel, c);
+                let mut bytes = Vec::with_capacity(data.len() * 2);
+                for &s in data {
+                    bytes.extend_from_slice(&s.to_le_bytes());
+                }
+                f.seek(SeekFrom::Start((c * CHUNK_SAMPLES * 2) as u64))?;
+                f.write_all(&bytes)?;
+                written += 1;
+            }
+            tape.clear_bus_dirty(channel);
+        }
         Ok(written)
     }
 
@@ -183,6 +238,23 @@ impl Project {
                 .collect();
             tape.write_raw(t, 0, &samples);
             tape.clear_dirty(t);
+        }
+        for channel in BusChannel::BOTH {
+            // Missing bus files read as "never bounced yet" - all-zero,
+            // exactly how a fresh cassette's tracks start - so every
+            // cassette saved before this feature existed opens
+            // unchanged rather than erroring (REQ-801).
+            let Ok(mut f) = fs::File::open(bus_path(&self.dir, channel)) else {
+                continue;
+            };
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes)?;
+            let samples: Vec<i16> = bytes
+                .chunks_exact(2)
+                .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            tape.write_bus_raw(channel, 0, &samples);
+            tape.clear_bus_dirty(channel);
         }
         Ok(tape)
     }
@@ -275,5 +347,87 @@ mod tests {
         assert_eq!(restored.pan(2), -0.5);
         assert_eq!(restored.master_db(), -2.0);
         assert_eq!(reopened.manifest.playhead, 12_345);
+    }
+    #[test]
+    fn bus_audio_and_controls_roundtrip_through_disk() {
+        let dir = TempDir::new("bus-roundtrip");
+        let p = Project::create(&dir.0, CHUNK_SAMPLES * 2, 42).unwrap();
+        let mut tape = Tape::new(CHUNK_SAMPLES * 2);
+        let left: Vec<i16> = (0..5000).map(|i| (i * 7) as i16).collect();
+        let right: Vec<i16> = (0..5000).map(|i| -((i * 3) as i16)).collect();
+        tape.write_bus_raw(BusChannel::Left, 100, &left);
+        tape.write_bus_raw(BusChannel::Right, 100, &right);
+        p.save(&mut tape).unwrap();
+
+        let loaded = p.load_tape().unwrap();
+        let mut got_l = vec![0i16; 5000];
+        let mut got_r = vec![0i16; 5000];
+        loaded.read_bus_raw(BusChannel::Left, 100, &mut got_l);
+        loaded.read_bus_raw(BusChannel::Right, 100, &mut got_r);
+        assert_eq!(got_l, left, "bus left must survive a save/reopen");
+        assert_eq!(got_r, right, "bus right must survive a save/reopen");
+        assert!(
+            loaded.bus_dirty_chunks(BusChannel::Left).is_empty(),
+            "a freshly loaded bus is not dirty"
+        );
+    }
+
+    #[test]
+    fn only_dirty_bus_chunks_are_written() {
+        let dir = TempDir::new("bus-dirty");
+        let p = Project::create(&dir.0, CHUNK_SAMPLES * 4, 1).unwrap();
+        let mut tape = Tape::new(CHUNK_SAMPLES * 4);
+        tape.write_bus_raw(BusChannel::Left, 0, &[5i16; 100]);
+        // One chunk, one channel - not eight.
+        assert_eq!(p.save_tape(&mut tape).unwrap(), 1);
+        assert_eq!(p.save_tape(&mut tape).unwrap(), 0, "nothing left dirty");
+    }
+
+    #[test]
+    fn bus_fader_and_mute_persist_and_default_for_old_cassettes() {
+        let dir = TempDir::new("bus-controls");
+        let mut p = Project::create(&dir.0, 48_000, 1).unwrap();
+        let mut mixer = Mixer::new();
+        mixer.set_bus_fader_db(-7.5);
+        mixer.set_bus_muted(true);
+        p.manifest.capture_from(&mixer);
+        p.save(&mut Tape::new(48_000)).unwrap();
+
+        let reopened = Project::open(&dir.0).unwrap();
+        assert_eq!(reopened.manifest.bounce_fader_db, -7.5);
+        assert!(reopened.manifest.bounce_muted);
+        let mut fresh = Mixer::new();
+        reopened.manifest.apply_to(&mut fresh);
+        assert_eq!(fresh.bus_fader_db(), -7.5);
+        assert!(fresh.is_bus_muted());
+    }
+
+    #[test]
+    fn a_pre_bus_cassette_opens_with_a_silent_bus_at_unity() {
+        // REQ-801: no bus files, no bus fields in the manifest - the
+        // shape every cassette saved before this feature has.
+        let dir = TempDir::new("pre-bus");
+        let p = Project::create(&dir.0, 48_000, 1).unwrap();
+        std::fs::remove_file(dir.0.join("tape").join("bounce_l.raw")).unwrap();
+        std::fs::remove_file(dir.0.join("tape").join("bounce_r.raw")).unwrap();
+        let old = r#"{"len_samples":48000,"noise_seed":1,"playhead":0,
+            "fader_db":[0.0,0.0,0.0,0.0],"pan":[0.0,0.0,0.0,0.0],"master_db":0.0}"#;
+        std::fs::write(dir.0.join("manifest.json"), old).unwrap();
+
+        let reopened = Project::open(&dir.0).unwrap();
+        assert_eq!(reopened.manifest.bounce_fader_db, 0.0, "unity");
+        assert!(!reopened.manifest.bounce_muted, "unmuted");
+        let tape = reopened
+            .load_tape()
+            .expect("missing bus files must not error");
+        let mut got = vec![9i16; 100];
+        tape.read_bus_raw(BusChannel::Left, 0, &mut got);
+        assert_eq!(got, vec![0i16; 100], "never bounced reads as silence");
+
+        // And saving such a cassette creates the files rather than failing.
+        let mut tape = tape;
+        tape.write_bus_raw(BusChannel::Left, 0, &[3i16; 50]);
+        p.save_tape(&mut tape).unwrap();
+        assert!(dir.0.join("tape").join("bounce_l.raw").exists());
     }
 }

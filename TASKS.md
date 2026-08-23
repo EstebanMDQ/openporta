@@ -1224,7 +1224,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       third allowed one (plus a save refilling the reserve), and
       tracks-silent-but-metered with the bus muted. Full gate green,
       golden unaffected.
-- [ ] M7.8 porta-engine: bus persistence - tape/bounce_l.raw +
+- [x] M7.8 porta-engine: bus persistence - tape/bounce_l.raw +
       bounce_r.raw written in the existing 5s dirty-chunk pattern;
       Project::open/load_tape treat missing bus files as never-
       bounced silence; Manifest gains bounce_fader_db: f32 +
@@ -1233,6 +1233,17 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       reopen roundtrips bus audio byte-exact and fader/mute values;
       a cassette saved before this feature opens with a silent bus at
       unity/unmuted; only dirty bus chunks are written)
+      Done 2026-08-23. bounce_l/r.raw alongside the track files, same
+      5s dirty-chunk write path; create() zero-fills them, load_tape
+      treats a missing file as never-bounced silence, and save_tape
+      CREATES a missing file on first write so an old cassette can be
+      bounced and saved rather than erroring. Manifest gained
+      bounce_fader_db/bounce_muted (#[serde(default)]) carried by
+      apply_to/capture_from - worth persisting more than most mix
+      state, since a muted bus changes what the NEXT bounce prints.
+      4 new tests including a genuine pre-bus cassette (bus files
+      deleted, old manifest JSON without the fields) opening clean at
+      unity/unmuted and then saving successfully. Full gate green.
 - [ ] M7.9 porta-app script runner (+ fixtures): new ops Op::Mute
       {track, on}, Op::BounceArm {on}, Op::BounceFader {db},
       Op::BounceMute {on}, and Op::Bounce {seconds} (errors unless the
