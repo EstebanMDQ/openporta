@@ -64,6 +64,26 @@ pub enum Op {
     Master {
         db: f32,
     },
+    /// Silence a track's contribution without touching its fader.
+    Mute {
+        track: usize,
+        #[serde(default = "yes")]
+        on: bool,
+    },
+    /// Arm the stereo bounce bus (REQ-404). Mutually exclusive with
+    /// arming any track - the engine enforces that.
+    BounceArm {
+        #[serde(default = "yes")]
+        on: bool,
+    },
+    /// The bus's own fader (REQ-409).
+    BounceFader {
+        db: f32,
+    },
+    BounceMute {
+        #[serde(default = "yes")]
+        on: bool,
+    },
     /// Record `input_wav` onto the armed tracks from the playhead.
     Record {
         input_wav: String,
@@ -75,8 +95,13 @@ pub enum Op {
     Undo,
     Redo,
     Save,
-    /// Sum tracks 1-3 onto track 4, destructively.
-    Bounce,
+    /// Roll a real-time bounce pass onto the armed bus for `seconds`
+    /// (REQ-401). Errors unless the bus is armed first with
+    /// `bounce_arm` - the pass is what Record does with the bus armed,
+    /// not a separate batch operation.
+    Bounce {
+        seconds: f32,
+    },
     /// Write the stereo mixdown captured since the last export to a WAV.
     /// `bits` accepts "16" (default) or "24".
     Export {
@@ -221,7 +246,17 @@ impl Runner {
             Op::Undo => self.engine()?.undo()?,
             Op::Redo => self.engine()?.redo()?,
             Op::Save => self.engine()?.save()?,
-            Op::Bounce => self.engine()?.bounce()?,
+            Op::Mute { track, on } => {
+                Self::check_track(*track)?;
+                self.engine()?.mixer().set_muted(*track, *on);
+            }
+            Op::BounceArm { on } => self.engine()?.set_bus_armed(*on),
+            Op::BounceFader { db } => self.engine()?.mixer().set_bus_fader_db(*db),
+            Op::BounceMute { on } => self.engine()?.mixer().set_bus_muted(*on),
+            Op::Bounce { seconds } => {
+                let n = (porta_engine::SAMPLE_RATE as f32 * seconds) as usize;
+                self.bounce(n)?;
+            }
             Op::Export { out, bits } => {
                 let depth = bits
                     .as_deref()
@@ -270,6 +305,40 @@ impl Runner {
             self.captured.0.extend_from_slice(&l[..n]);
             self.captured.1.extend_from_slice(&r[..n]);
             fed = end;
+        }
+        engine.stop();
+        Ok(())
+    }
+
+    /// Roll a bounce pass, capturing the monitor output the same way
+    /// `play` does - during a bounce that is the bus's printed signal
+    /// with tracks 1-4 excluded (REQ-408), which is exactly what an
+    /// export taken across a bounce should contain.
+    fn bounce(&mut self, samples: usize) -> Result<(), ScriptError> {
+        let engine = self
+            .engine
+            .as_mut()
+            .ok_or(ScriptError::Engine(EngineError::NotStopped("no cassette")))?;
+        if !engine.is_bus_armed() {
+            return Err(ScriptError::Engine(EngineError::NotStopped(
+                "bounce needs the bus armed (bounce_arm)",
+            )));
+        }
+        engine.record();
+        let silence = vec![0.0; BLOCK];
+        let inputs: [&[f32]; NUM_TRACKS] = [&silence, &silence, &silence, &silence];
+        let mut l = vec![0.0; BLOCK];
+        let mut r = vec![0.0; BLOCK];
+        let mut done = 0;
+        while done < samples {
+            let want = BLOCK.min(samples - done);
+            let n = engine.process_block(&inputs, &mut l[..want], &mut r[..want]);
+            if n == 0 {
+                break;
+            }
+            self.captured.0.extend_from_slice(&l[..n]);
+            self.captured.1.extend_from_slice(&r[..n]);
+            done += n;
         }
         engine.stop();
         Ok(())

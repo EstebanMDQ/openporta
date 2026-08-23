@@ -1244,7 +1244,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       4 new tests including a genuine pre-bus cassette (bus files
       deleted, old manifest JSON without the fields) opening clean at
       unity/unmuted and then saving successfully. Full gate green.
-- [ ] M7.9 porta-app script runner (+ fixtures): new ops Op::Mute
+- [x] M7.9 porta-app script runner (+ fixtures): new ops Op::Mute
       {track, on}, Op::BounceArm {on}, Op::BounceFader {db},
       Op::BounceMute {on}, and Op::Bounce {seconds} (errors unless the
       bus is armed; runs the transport like Op::Play); update the
@@ -1255,6 +1255,29 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       the same commit and notify the owner. REQ-804. (verify: a script
       drives arm/fader/mute/bounce headlessly end to end; golden
       passes against the regenerated reference; cli suite green)
+      Done 2026-08-23. Five new ops (mute, bounce_arm, bounce_fader,
+      bounce_mute, bounce{seconds}); Op::Bounce errors unless the bus
+      is armed and rolls the transport like Op::Play, capturing the
+      monitor output - which during a bounce is the printed signal with
+      tracks excluded (REQ-408), exactly what an export across a bounce
+      should contain.
+      *** GOLDEN RE-BLESSED - the proposal's single regeneration event.
+      Understood before blessing, not blessed to make a red test green:
+      the session's bounce semantics genuinely changed (mono sum onto
+      track 4 -> stereo bus), so track3.raw is now EMPTY where it used
+      to hold the sum, and the bus carries the print. Verified by
+      running the golden session standalone and inspecting the raw tape:
+      bounce_l/r.raw non-zero, track3.raw all zeros, tracks 0-2 intact.
+      Also took the opportunity - same event, no extra cost - to widen
+      the bounce window from 0.5s to 1.5s: at 0.5s it only covered the
+      centered bass (the script records sequentially, so the panned
+      chord/lead sit later on the tape) and the print was mono, L-vs-R
+      differing by only 1.9 rms of per-channel dither/hiss. At 1.5s the
+      print carries a real stereo image (908 rms L/R difference across
+      the panned chord), so the golden actually exercises the stereo
+      bus instead of a mono-only window. New reference: no clipping,
+      comparable level (rmsL 4970 vs 4861), wider image (L-R 912 vs
+      737). ***
 - [ ] M7.10 porta-engine + porta-app: delete the old bounce -
       Command::Bounce and its is_blocking() arm, Engine::bounce(), the
       disk_touching_commands_are_marked_blocking assertion about it;
