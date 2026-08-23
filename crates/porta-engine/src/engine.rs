@@ -9,12 +9,13 @@
 
 use crate::mixer::Mixer;
 use crate::project::{Manifest, Project, ProjectError};
-use crate::record::RecordPass;
+use crate::record::{BouncePass, RecordPass};
 use crate::tape::{BusChannel, Tape};
 use crate::transport::{Transport, TransportState};
 use crate::undo::{Journal, UndoError};
 use crate::NUM_TRACKS;
 use porta_dsp::character::TapeCharacter;
+use porta_dsp::flutter::StereoFlutter;
 use porta_dsp::{AudioProcessor, Chain, MAX_BLOCK};
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +56,24 @@ pub struct Engine {
     /// bounce it holds the freshly printed signal (REQ-408). Allocated
     /// here, once, off the realtime thread.
     bus_playback: (Vec<f32>, Vec<f32>),
+    /// Phase 1's ungated print sum, threaded from `sum_tracks` through
+    /// the bus's own chain (REQ-406). Engine-owned and allocated once:
+    /// `Mixer` has no reason to remember it between calls.
+    print_buf: (Vec<f32>, Vec<f32>),
+    /// The bus's smoothed gain, ticked once per sample up front and
+    /// read back at BOTH use sites - folded into the print input
+    /// pre-chain, and applied to the monitor output post-chain. Ticking
+    /// at each site instead would advance the ramp twice per sample,
+    /// doubling its rate and making the result depend on how often it
+    /// happened to be read (REQ-203/602).
+    bus_gain_scratch: Vec<f32>,
+    /// One channel's chain halves either side of the shared flutter,
+    /// built unconditionally at open/create (never lazily, never on the
+    /// audio thread) and reset+reseeded per pass.
+    bounce_chain_l: (Chain, Chain),
+    bounce_chain_r: (Chain, Chain),
+    bounce_flutter: StereoFlutter,
+    bounce_pass: BouncePass,
 }
 
 impl Engine {
@@ -118,6 +137,15 @@ impl Engine {
             processed: vec![vec![0.0; MAX_BLOCK]; NUM_TRACKS],
             playback: vec![vec![0.0; MAX_BLOCK]; NUM_TRACKS],
             bus_playback: (vec![0.0; MAX_BLOCK], vec![0.0; MAX_BLOCK]),
+            print_buf: (vec![0.0; MAX_BLOCK], vec![0.0; MAX_BLOCK]),
+            bus_gain_scratch: vec![0.0; MAX_BLOCK],
+            // Unconditionally, like the track chains above - not lazily
+            // on first arm, which would land on the audio thread
+            // (arming is not a blocking command).
+            bounce_chain_l: character.build_split_chain(0),
+            bounce_chain_r: character.build_split_chain(0),
+            bounce_flutter: character.build_stereo_flutter(0),
+            bounce_pass: BouncePass::new(MAX_BLOCK),
         })
     }
 
@@ -287,6 +315,11 @@ impl Engine {
 
     /// Engage recording on the armed tracks, opening a pass for each.
     pub fn record(&mut self) {
+        if self.bus_armed {
+            self.begin_bounce_pass();
+            self.transport.record();
+            return;
+        }
         if self.armed.iter().all(|&a| !a) {
             return;
         }
@@ -317,6 +350,53 @@ impl Engine {
         self.transport.record();
     }
 
+    /// Engage a stereo bounce pass (REQ-301/401). Realtime-safe: the
+    /// capture buffers come from the journal's pre-allocated reserve
+    /// and the chains are reseeded in place, never rebuilt.
+    fn begin_bounce_pass(&mut self) {
+        if self.bounce_pass.is_open() {
+            return;
+        }
+        let start = self.transport.playhead();
+        let noise_seed = self.project.manifest.noise_seed;
+        let pass = self.pass_counter;
+        self.pass_counter += 1;
+        let seed_l = seed_for_channel(noise_seed, pass, 0);
+        let seed_r = seed_for_channel(noise_seed, pass, 1);
+
+        let character = self.project.manifest.character;
+        character.reseed_split_chain(
+            &mut self.bounce_chain_l.0,
+            &mut self.bounce_chain_l.1,
+            seed_l,
+        );
+        character.reseed_split_chain(
+            &mut self.bounce_chain_r.0,
+            &mut self.bounce_chain_r.1,
+            seed_r,
+        );
+        // One shared modulator, seeded at channel term 0 by convention.
+        self.bounce_flutter.reseed(seed_l);
+
+        let len = self.tape.len_samples();
+        let (left, right, from_reserve) = match self.journal.take_bus_buffers() {
+            Some((l, r)) => (l, r, true),
+            // Documented, counted fallback: both reserve pairs are still
+            // out (two bounces already pending a flush). Allocating here
+            // is a real REQ-902 exception, so it is counted rather than
+            // hidden - see pass_buffer_fallbacks().
+            None => (vec![0i16; len], vec![0i16; len], false),
+        };
+        self.bounce_pass
+            .begin(start, seed_l, seed_r, left, right, from_reserve);
+        // Tracks 1-4 are already inside what the bus is printing, so
+        // their own contribution to the audible mix goes silent for the
+        // duration - metering deliberately unaffected (REQ-408).
+        for t in 0..NUM_TRACKS {
+            self.mixer.set_excluded_from_sum(t, true);
+        }
+    }
+
     /// Close any open passes, applying punch-out fades and journaling.
     /// Reachable from process_block itself (transport hitting the tape
     /// end while recording) as well as Stop/Play, all of which the
@@ -325,6 +405,17 @@ impl Engine {
     /// bookkeeping; the actual write is deferred until save/undo/redo,
     /// which are always run off the realtime thread (REQ-902).
     fn close_passes(&mut self) {
+        if self.bounce_pass.is_open() {
+            let (len, left, right) = self.bounce_pass.finish(&mut self.tape);
+            if self.bounce_pass.allocated_on_thread {
+                self.pass_buffer_fallbacks += 1;
+            }
+            let start = self.bounce_pass.start;
+            self.journal.push_bus_pass(start, len, left, right);
+            for t in 0..NUM_TRACKS {
+                self.mixer.set_excluded_from_sum(t, false);
+            }
+        }
         for t in 0..NUM_TRACKS {
             if let Some(mut pass) = self.passes[t].take() {
                 pass.finish(&mut self.tape);
@@ -401,23 +492,81 @@ impl Engine {
             }
         }
 
-        // The bus is part of the mix during ordinary playback too, not
-        // only while bouncing (REQ-401): read its stored content into
-        // its playback slot exactly as an idle track's is read. A
-        // bounce pass overwrites this slot with the printed signal
-        // instead (REQ-408) - that lands in M7.7.
-        self.tape
-            .read_bus(BusChannel::Left, pos, &mut self.bus_playback.0[..n]);
-        self.tape
-            .read_bus(BusChannel::Right, pos, &mut self.bus_playback.1[..n]);
+        let bouncing = recording && self.bounce_pass.is_open();
 
+        // Phase 1. During a bounce the print sum is what feeds the bus's
+        // chain; tracks 1-4 are in it at full weight even though they
+        // are excluded from the audible monitor sum (REQ-406/408).
         let views: [&[f32]; NUM_TRACKS] = std::array::from_fn(|t| &self.playback[t][..n]);
-        self.mixer
-            .sum_tracks(&views, &mut out_l[..n], &mut out_r[..n], None);
+        if bouncing {
+            let (pl, pr) = &mut self.print_buf;
+            self.mixer.sum_tracks(
+                &views,
+                &mut out_l[..n],
+                &mut out_r[..n],
+                Some((&mut pl[..n], &mut pr[..n])),
+            );
+        } else {
+            self.mixer
+                .sum_tracks(&views, &mut out_l[..n], &mut out_r[..n], None);
+        }
+
+        // The bus's gain for this block, ticked exactly once per sample
+        // and read back at both use sites below (REQ-408's tick-once
+        // rule) - the chain runs between them, so neither site can
+        // safely tick for itself.
+        self.mixer.tick_bus_gain(&mut self.bus_gain_scratch[..n]);
+
+        if bouncing {
+            // REQ-407: the bus's own prior content at this position,
+            // read BEFORE the pass writes over it, is part of what gets
+            // printed - which is what makes a second bounce fold the
+            // first one forward with no special self-referential code.
+            self.tape
+                .read_bus(BusChannel::Left, pos, &mut self.bus_playback.0[..n]);
+            self.tape
+                .read_bus(BusChannel::Right, pos, &mut self.bus_playback.1[..n]);
+            for i in 0..n {
+                let g = self.bus_gain_scratch[i];
+                self.print_buf.0[i] += self.bus_playback.0[i] * g;
+                self.print_buf.1[i] += self.bus_playback.1[i] * g;
+            }
+
+            // The character chain, per channel, around one shared
+            // flutter (REQ-402). This is the pre-master tap: no master
+            // gain has touched any of it (REQ-406).
+            self.bounce_chain_l.0.process(&mut self.print_buf.0[..n]);
+            self.bounce_chain_r.0.process(&mut self.print_buf.1[..n]);
+            self.bounce_flutter
+                .process(&mut self.print_buf.0[..n], &mut self.print_buf.1[..n]);
+            self.bounce_chain_l.1.process(&mut self.print_buf.0[..n]);
+            self.bounce_chain_r.1.process(&mut self.print_buf.1[..n]);
+
+            self.bounce_pass.write_block(
+                &mut self.tape,
+                &self.print_buf.0[..n],
+                &self.print_buf.1[..n],
+            );
+            // Monitor the printed signal itself, through the bus's own
+            // fader/mute like any other playback (REQ-408) - not the old
+            // tape content, and not bypassing the fader.
+            self.bus_playback.0[..n].copy_from_slice(&self.print_buf.0[..n]);
+            self.bus_playback.1[..n].copy_from_slice(&self.print_buf.1[..n]);
+        } else {
+            // Ordinary playback: the bus contributes its stored content,
+            // exactly as an idle track does (REQ-401).
+            self.tape
+                .read_bus(BusChannel::Left, pos, &mut self.bus_playback.0[..n]);
+            self.tape
+                .read_bus(BusChannel::Right, pos, &mut self.bus_playback.1[..n]);
+        }
+
+        // Phase 2, with the gain already ticked above.
         self.mixer.finish_mix(
             &mut out_l[..n],
             &mut out_r[..n],
             Some((&self.bus_playback.0[..n], &self.bus_playback.1[..n])),
+            Some(&self.bus_gain_scratch[..n]),
         );
         self.transport.advance(n);
         if self.transport.is_stopped() {
@@ -464,6 +613,15 @@ fn db_to_amp(db: f32) -> f32 {
 
 /// Per-pass seed: cassette seed mixed with the pass counter, so each pass
 /// is decorrelated but the whole session stays reproducible (REQ-304).
+/// Per-channel seed for a stereo pass (REQ-702): the ordinary pass
+/// derivation with a channel term folded in, so L and R decorrelate.
+/// Channel 0 is left, and is also what the single shared flutter
+/// modulator seeds at - a fixed choice, not an implementation
+/// coin-flip bit-reproducibility would silently depend on.
+fn seed_for_channel(noise_seed: u64, pass: u64, channel: u64) -> u32 {
+    seed_for(noise_seed, pass.wrapping_mul(2).wrapping_add(channel))
+}
+
 fn seed_for(noise_seed: u64, pass: u64) -> u32 {
     let mixed = noise_seed
         .wrapping_mul(6_364_136_223_846_793_005)
@@ -861,5 +1019,255 @@ mod tests {
                     .any(|e| e.file_name().to_string_lossy().starts_with("pass-"))
             })
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod bounce_pass_tests {
+    use super::*;
+    use porta_dsp::character::TapeCharacter;
+    use porta_testkit::meter::rms_dbfs;
+    use porta_testkit::signal::{silence, sine};
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("porta-bounce-{name}"));
+            let _ = std::fs::remove_dir_all(&p);
+            Self(p)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const LEN: usize = 48_000;
+
+    /// A cassette with material on tracks 0/1 and a clean character, so
+    /// assertions are about routing and summing rather than colour.
+    fn seeded(dir: &std::path::Path, seed: u64) -> Engine {
+        let character = TapeCharacter {
+            noise_seed: seed,
+            ..TapeCharacter::clean()
+        };
+        let mut e = Engine::create_with_character(dir, LEN, character).unwrap();
+        for (t, freq) in [(0usize, 220.0f32), (1, 330.0)] {
+            let tone = sine(freq, -9.0, 24_000);
+            let q: Vec<i16> = tone.iter().map(|&s| (s * 32767.0).round() as i16).collect();
+            e.tape.write_raw(t, 0, &q);
+        }
+        e
+    }
+
+    /// Roll a bounce over `samples` from position 0.
+    fn bounce(e: &mut Engine, samples: usize) {
+        e.seek(0);
+        e.set_bus_armed(true);
+        e.record();
+        let quiet = silence(512);
+        let inputs: [&[f32]; NUM_TRACKS] = [&quiet, &quiet, &quiet, &quiet];
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        let mut done = 0;
+        while done < samples {
+            let want = 512.min(samples - done);
+            let n = e.process_block(&inputs, &mut l[..want], &mut r[..want]);
+            if n == 0 {
+                break;
+            }
+            done += n;
+        }
+        e.stop();
+    }
+
+    fn bus_raw(e: &Engine, len: usize) -> (Vec<i16>, Vec<i16>) {
+        let mut l = vec![0i16; len];
+        let mut r = vec![0i16; len];
+        e.tape.read_bus_raw(BusChannel::Left, 0, &mut l);
+        e.tape.read_bus_raw(BusChannel::Right, 0, &mut r);
+        (l, r)
+    }
+
+    #[test]
+    fn a_bounce_prints_the_track_mix_and_is_reproducible() {
+        let d1 = TempDir::new("print-a");
+        let d2 = TempDir::new("print-b");
+        let mut a = seeded(&d1.0, 7);
+        let mut b = seeded(&d2.0, 7);
+        // Same live fader/pan on both, different master positions: the
+        // master must not reach tape (REQ-406).
+        for e in [&mut a, &mut b] {
+            e.mixer().set_fader_db(0, -3.0);
+            e.mixer().set_pan(1, 0.6);
+        }
+        a.mixer().set_master_db(0.0);
+        b.mixer().set_master_db(-9.0);
+
+        bounce(&mut a, 12_000);
+        bounce(&mut b, 12_000);
+
+        let (al, ar) = bus_raw(&a, 12_000);
+        let (bl, br) = bus_raw(&b, 12_000);
+        assert!(
+            al.iter().any(|&s| s != 0),
+            "the bounce must actually print something"
+        );
+        assert_eq!(al, bl, "master position must not change what is printed");
+        assert_eq!(ar, br, "master position must not change what is printed");
+        // Panning track 1 right must make the channels differ - the
+        // whole point of a stereo bus (REQ-401 vs the old mono sum).
+        assert_ne!(al, ar, "a panned source must print a stereo image");
+    }
+
+    #[test]
+    fn tracks_and_bus_never_disturb_each_other() {
+        // REQ-306 in both directions.
+        let dir = TempDir::new("isolation");
+        let mut e = seeded(&dir.0, 3);
+        let before: Vec<Vec<i16>> = (0..NUM_TRACKS)
+            .map(|t| {
+                let mut v = vec![0i16; 24_000];
+                e.tape.read_raw(t, 0, &mut v);
+                v
+            })
+            .collect();
+
+        bounce(&mut e, 12_000);
+
+        for (t, want) in before.iter().enumerate() {
+            let mut got = vec![0i16; 24_000];
+            e.tape.read_raw(t, 0, &mut got);
+            assert_eq!(&got, want, "track {t} changed across a bounce");
+        }
+
+        // And an ordinary track pass leaves the bus alone.
+        let bus_before = bus_raw(&e, 12_000);
+        e.seek(0);
+        e.set_armed(2, true);
+        e.record();
+        let tone = sine(440.0, -6.0, 4096);
+        let quiet = silence(512);
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        for chunk in tone.chunks(512) {
+            let mut inputs: [&[f32]; NUM_TRACKS] = [&quiet, &quiet, &quiet, &quiet];
+            inputs[2] = chunk;
+            e.process_block(&inputs, &mut l[..chunk.len()], &mut r[..chunk.len()]);
+        }
+        e.stop();
+        assert_eq!(
+            bus_raw(&e, 12_000),
+            bus_before,
+            "the bus changed across an ordinary track pass"
+        );
+    }
+
+    #[test]
+    fn a_second_bounce_folds_the_first_one_forward() {
+        // REQ-407: the bus's prior content is read before it is
+        // overwritten, so bouncing again keeps what was already there
+        // instead of replacing it.
+        let dir = TempDir::new("fold-forward");
+        let mut e = seeded(&dir.0, 11);
+        bounce(&mut e, 12_000);
+        let first = bus_raw(&e, 12_000);
+
+        // Mute the tracks so the second pass can only print what the
+        // bus already held - if prior content were ignored, this would
+        // come back silent.
+        for t in 0..NUM_TRACKS {
+            e.mixer().set_muted(t, true);
+        }
+        bounce(&mut e, 12_000);
+        let second = bus_raw(&e, 12_000);
+
+        let energy = rms_dbfs(
+            &second
+                .0
+                .iter()
+                .map(|&s| f32::from(s) / 32768.0)
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            energy > -60.0,
+            "the second bounce lost the first one's content: {energy:.1} dBFS"
+        );
+        assert_ne!(first, second, "a second generation must degrade, not clone");
+    }
+
+    #[test]
+    fn one_undo_reverts_both_channels_of_a_bounce() {
+        let dir = TempDir::new("bounce-undo");
+        let mut e = seeded(&dir.0, 5);
+        let before = bus_raw(&e, 12_000);
+        bounce(&mut e, 12_000);
+        let after = bus_raw(&e, 12_000);
+        assert_ne!(after, before);
+
+        e.undo().unwrap();
+        assert_eq!(bus_raw(&e, 12_000), before, "one undo must revert both");
+        e.redo().unwrap();
+        assert_eq!(bus_raw(&e, 12_000), after, "one redo must restore both");
+    }
+
+    #[test]
+    fn two_back_to_back_bounces_never_allocate_a_third_may() {
+        // The double-buffered reserve's whole purpose, and the honest
+        // boundary of the guarantee.
+        let dir = TempDir::new("no-fallback");
+        let mut e = seeded(&dir.0, 13);
+        bounce(&mut e, 4096);
+        bounce(&mut e, 4096);
+        assert_eq!(
+            e.pass_buffer_fallbacks(),
+            0,
+            "two bounces with nothing saved in between must come from the reserve"
+        );
+        bounce(&mut e, 4096);
+        // A third is allowed to fall back - documented, not a bug.
+        assert!(e.pass_buffer_fallbacks() <= 1);
+
+        // After a save the reserve refills, so bouncing is clean again.
+        e.save().unwrap();
+        let baseline = e.pass_buffer_fallbacks();
+        bounce(&mut e, 4096);
+        assert_eq!(
+            e.pass_buffer_fallbacks(),
+            baseline,
+            "a flush must return the reserve pairs"
+        );
+    }
+
+    #[test]
+    fn tracks_are_excluded_from_the_monitor_sum_but_still_metered() {
+        // REQ-408. With the bus muted the audible output is exactly
+        // silent while the meters stay live - the clean measurable form
+        // of "excluded but metered".
+        let dir = TempDir::new("monitor-exclusion");
+        let mut e = seeded(&dir.0, 17);
+        e.mixer().set_bus_muted(true);
+        e.seek(0);
+        e.set_bus_armed(true);
+        e.record();
+
+        let quiet = silence(512);
+        let inputs: [&[f32]; NUM_TRACKS] = [&quiet, &quiet, &quiet, &quiet];
+        let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            let n = e.process_block(&inputs, &mut l, &mut r);
+            out.extend_from_slice(&l[..n]);
+        }
+        let level = rms_dbfs(&out);
+        assert!(
+            level < -100.0,
+            "tracks must be excluded from the audible sum: {level:.1} dBFS"
+        );
+        assert!(
+            e.track_level_db(0) > -40.0,
+            "track 0's meter must stay live during a bounce, got {:.1}",
+            e.track_level_db(0)
+        );
+        e.stop();
     }
 }

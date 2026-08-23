@@ -316,14 +316,19 @@ impl Mixer {
     /// 1's monitor sum and leave holding the finished output - the only
     /// place `out_l`/`out_r` are written.
     ///
-    /// The bus gain and the master both tick exactly once per sample
-    /// here, including when `bus` is `None` - a frozen ramp would break
+    /// `bus_gain`, when given, is this block's already-ticked gain from
+    /// `tick_bus_gain` - a bounce pass needs the same per-sample values
+    /// before the chain and after it, and the chain runs between the
+    /// two phases, so it ticks once up front and hands the values here.
+    /// When `None`, this ticks the ramp itself, once per sample,
+    /// including when `bus` is `None`: a frozen ramp would break
     /// block-size invariance just as surely as a double-ticked one.
     pub fn finish_mix(
         &mut self,
         out_l: &mut [f32],
         out_r: &mut [f32],
         bus: Option<(&[f32], &[f32])>,
+        bus_gain: Option<&[f32]>,
     ) {
         let len = out_l.len();
         assert_eq!(out_r.len(), len);
@@ -334,10 +339,19 @@ impl Mixer {
             assert_eq!(bl.len(), len);
             assert_eq!(br.len(), len);
         }
-        self.bus_gain.set_target(self.bus_target());
+        if bus_gain.is_none() {
+            self.bus_gain.set_target(self.bus_target());
+        }
         self.master.set_target(db_to_amp(self.master_db));
         for n in 0..len {
-            let bg = self.bus_gain.tick();
+            // Either the caller already ticked this block's gain (a
+            // bounce needs the same values pre-chain, and ticking here
+            // too would advance the ramp twice per sample) or we tick
+            // it ourselves - exactly once, either way.
+            let bg = match bus_gain {
+                Some(g) => g[n],
+                None => self.bus_gain.tick(),
+            };
             if let Some((bl, br)) = bus {
                 out_l[n] += bl[n] * bg;
                 out_r[n] += br[n] * bg;
@@ -372,7 +386,18 @@ impl Mixer {
         out_r: &mut [f32],
     ) {
         self.sum_tracks(inputs, out_l, out_r, None);
-        self.finish_mix(out_l, out_r, None);
+        self.finish_mix(out_l, out_r, None, None);
+    }
+
+    /// Fill `out` with this block's bus gain, one ticked value per
+    /// sample. For the bounce path, which needs the same values either
+    /// side of the character chain; ordinary playback lets `finish_mix`
+    /// tick for itself instead.
+    pub fn tick_bus_gain(&mut self, out: &mut [f32]) {
+        self.bus_gain.set_target(self.bus_target());
+        for slot in out.iter_mut() {
+            *slot = self.bus_gain.tick();
+        }
     }
 }
 
@@ -580,7 +605,7 @@ mod tests {
         let run = |m: &mut Mixer| {
             let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
             m.sum_tracks(&inputs, &mut l, &mut r, None);
-            m.finish_mix(&mut l, &mut r, Some((&bus, &bus)));
+            m.finish_mix(&mut l, &mut r, Some((&bus, &bus)), None);
             (rms_dbfs(&l[2400..]), rms_dbfs(&r[2400..]))
         };
 

@@ -1178,7 +1178,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       REQ-404/405/409. (verify: mutual exclusion both directions; bus
       content audible at its fader during plain playback and mute
       silences it; fader/mute moves ride the 5ms ramp, no clicks)
-- [ ] M7.7 porta-engine: the realtime bounce pass in
+- [x] M7.7 porta-engine: the realtime bounce pass in
       Engine::process_block. record() with the bus armed engages a
       stereo pass (REQ-301); print buffers, bus playback pair, and
       the per-block gain scratch buffer are Engine-owned, allocated at
@@ -1200,6 +1200,30 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       two back-to-back bounces with nothing saved keep
       pass_buffer_fallbacks() == 0 and a third is allowed to fall back;
       renders bit-reproducible)
+      Done 2026-08-23. New BouncePass in record.rs mirrors RecordPass
+      (same REQ-302 crossfades, same displaced capture) with three
+      differences: two channels in lockstep, one full-tape buffer per
+      channel from the reserve instead of chunks, and REUSED IN PLACE -
+      Engine owns one for its whole life and calls begin()/finish(), so
+      engaging a bounce allocates nothing. Caught during implementation:
+      finish() must NOT truncate the capture buffers to the pass length,
+      or they go back to the reserve short and the next bounce can't use
+      them - len travels alongside instead (push_bus_pass and
+      Pending::Bus both carry it). process_block's bounce branch:
+      sum_tracks with the print sum, tick_bus_gain once into the
+      Engine-owned scratch, add the bus's prior content read before
+      write (REQ-407), run pre/flutter/post per channel, write through
+      the pass, copy W into the bus playback slot, then finish_mix with
+      the ALREADY-ticked gain (new Option<&[f32]> param - ticking there
+      too would double the ramp rate). Tracks excluded-but-metered for
+      the pass duration. 6 acceptance tests, all green first run: stereo
+      image printed and identical across two master positions on
+      same-seed cassettes, REQ-306 both directions, fold-forward with
+      tracks muted proving prior content is read, one undo/redo
+      reverting both channels, two bounces with zero fallbacks and a
+      third allowed one (plus a save refilling the reserve), and
+      tracks-silent-but-metered with the bus muted. Full gate green,
+      golden unaffected.
 - [ ] M7.8 porta-engine: bus persistence - tape/bounce_l.raw +
       bounce_r.raw written in the existing 5s dirty-chunk pattern;
       Project::open/load_tape treat missing bus files as never-

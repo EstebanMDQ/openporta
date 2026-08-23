@@ -40,6 +40,10 @@ enum Pending {
     },
     Bus {
         id: u64,
+        /// Valid samples per channel. The buffers themselves stay full
+        /// tape length so they can go straight back to the reserve -
+        /// truncating them would hand the next bounce a short buffer.
+        len: usize,
         left: Vec<i16>,
         right: Vec<i16>,
     },
@@ -398,21 +402,24 @@ impl Journal {
     /// Buffers come back to the reserve when the payload is written
     /// (`flush_pending`) or dropped (`release_entry_payload`), routed by
     /// the `Pending::Bus` tag rather than inferred from an index.
-    pub fn push_bus_pass(&mut self, start: usize, left: Vec<i16>, right: Vec<i16>) {
-        assert_eq!(
-            left.len(),
-            right.len(),
+    pub fn push_bus_pass(&mut self, start: usize, len: usize, left: Vec<i16>, right: Vec<i16>) {
+        assert!(
+            left.len() >= len && right.len() >= len,
             "a bounce pass writes both channels in lockstep"
         );
         self.invalidate_redo();
-        if left.is_empty() {
+        if len == 0 {
             self.reclaim_bus_buffers(left, right);
             return;
         }
         let id = self.next_id;
         self.next_id += 1;
-        let len = left.len();
-        self.pending_writes.push(Pending::Bus { id, left, right });
+        self.pending_writes.push(Pending::Bus {
+            id,
+            len,
+            left,
+            right,
+        });
         self.undo.push(Entry::for_bus(id, start, len));
         self.evict();
     }
@@ -512,11 +519,16 @@ impl Journal {
                     // module doc.
                     self.reclaim_chunks(track, chunks);
                 }
-                Pending::Bus { id, left, right } => {
+                Pending::Bus {
+                    id,
+                    len,
+                    left,
+                    right,
+                } => {
                     // One file per entry: the left channel's bytes, then
                     // the right's, back to back. `Entry::len` is
                     // per-channel, so the reader knows where to split.
-                    self.write_payload_stereo(id, &left, &right)?;
+                    self.write_payload_stereo(id, &left[..len], &right[..len])?;
                     self.reclaim_bus_buffers(left, right);
                 }
             }
@@ -774,16 +786,14 @@ mod tests {
         let original = bus_snapshot(&tape, 1000);
 
         let (mut buf_l, mut buf_r) = j.take_bus_buffers().expect("reserve pair");
-        buf_l.truncate(1000);
-        buf_r.truncate(1000);
-        buf_l.copy_from_slice(&before_l);
-        buf_r.copy_from_slice(&before_r);
+        buf_l[..1000].copy_from_slice(&before_l);
+        buf_r[..1000].copy_from_slice(&before_r);
 
         // The new printed content replaces it on tape.
         tape.write_bus_raw(BusChannel::Left, 0, &vec![7i16; 1000]);
         tape.write_bus_raw(BusChannel::Right, 0, &vec![9i16; 1000]);
         let after_bounce = bus_snapshot(&tape, 1000);
-        j.push_bus_pass(0, buf_l, buf_r);
+        j.push_bus_pass(0, 1000, buf_l, buf_r);
 
         assert_eq!(j.depth(), 1, "one atomic entry, not two");
 
@@ -850,8 +860,8 @@ mod tests {
         );
 
         // Both pending payloads land, then a flush gives the pairs back.
-        j.push_bus_pass(0, a.0, a.1);
-        j.push_bus_pass(1000, b.0, b.1);
+        j.push_bus_pass(0, 100, a.0, a.1);
+        j.push_bus_pass(1000, 100, b.0, b.1);
         j.flush_pending().unwrap();
         assert!(j.take_bus_buffers().is_some(), "flush returns pair");
         assert!(j.take_bus_buffers().is_some(), "flush returns both pairs");
@@ -874,9 +884,9 @@ mod tests {
             .with_caps(1, u64::MAX);
 
         let (l, r) = j.take_bus_buffers().unwrap();
-        j.push_bus_pass(0, l, r); // pending, id 0
+        j.push_bus_pass(0, 100, l, r); // pending, id 0
         let (l2, r2) = j.take_bus_buffers().unwrap();
-        j.push_bus_pass(0, l2, r2); // forces eviction of id 0 while pending
+        j.push_bus_pass(0, 100, l2, r2); // forces eviction of id 0 while pending
 
         assert_eq!(j.depth(), 1, "cap enforced");
         assert!(

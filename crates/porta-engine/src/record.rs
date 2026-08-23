@@ -49,7 +49,7 @@
 //! takes are far shorter than 2 minutes), and counted via
 //! `allocated_on_thread` rather than silently swallowed.
 
-use crate::tape::{Tape, CHUNK_SAMPLES};
+use crate::tape::{BusChannel, Tape, CHUNK_SAMPLES};
 use porta_dsp::SAMPLE_RATE;
 use std::collections::VecDeque;
 
@@ -296,6 +296,190 @@ impl RecordPass {
         }
         tape.write_raw(self.track, self.start + offset, &self.current);
         current
+    }
+}
+
+/// A stereo bounce pass onto the bounce bus (change 001, REQ-401).
+///
+/// Mirrors `RecordPass` - same punch-in/punch-out crossfades (REQ-302),
+/// same displaced-content capture for undo - with three differences:
+/// it writes two channels in lockstep, its capture is one full-tape
+/// buffer per channel (from the journal's double-buffered reserve)
+/// rather than many small chunks, and it is **reused in place** rather
+/// than constructed per pass. `Engine` owns one for its whole life and
+/// calls `begin`/`finish`; nothing here allocates once constructed, so
+/// engaging a bounce from the audio thread is realtime-safe (REQ-902).
+pub struct BouncePass {
+    pub start: usize,
+    open: bool,
+    /// Displaced bus content, pass-relative (`[0..total_len)`), moved in
+    /// from the journal's reserve and moved back out on close.
+    displaced_l: Vec<i16>,
+    displaced_r: Vec<i16>,
+    total_len: usize,
+    dither_l: Dither,
+    dither_r: Dither,
+    /// Last `XFADE_SAMPLES` displaced samples per channel, so the
+    /// punch-out fade never has to reach back into the capture buffer.
+    tail_l: VecDeque<i16>,
+    tail_r: VecDeque<i16>,
+    scratch_l: Vec<i16>,
+    scratch_r: Vec<i16>,
+    /// Set when this pass had to run without a reserve pair - see
+    /// `Journal::take_bus_buffers`.
+    pub allocated_on_thread: bool,
+}
+
+impl BouncePass {
+    /// Allocate everything once, off the realtime thread.
+    pub fn new(max_block: usize) -> Self {
+        let cap = max_block.max(XFADE_SAMPLES);
+        Self {
+            start: 0,
+            open: false,
+            displaced_l: Vec::new(),
+            displaced_r: Vec::new(),
+            total_len: 0,
+            dither_l: Dither::new(1),
+            dither_r: Dither::new(1),
+            tail_l: VecDeque::with_capacity(XFADE_SAMPLES),
+            tail_r: VecDeque::with_capacity(XFADE_SAMPLES),
+            scratch_l: vec![0; cap],
+            scratch_r: vec![0; cap],
+            allocated_on_thread: false,
+        }
+    }
+
+    /// Open a pass at `start`. `displaced_*` are the capture buffers
+    /// (full tape length, from the reserve); `seed_l`/`seed_r` are this
+    /// pass's per-channel dither seeds. Realtime-safe: everything here
+    /// is a move or a reset, no allocation.
+    pub fn begin(
+        &mut self,
+        start: usize,
+        seed_l: u32,
+        seed_r: u32,
+        displaced_l: Vec<i16>,
+        displaced_r: Vec<i16>,
+        from_reserve: bool,
+    ) {
+        self.start = start;
+        self.open = true;
+        self.total_len = 0;
+        self.displaced_l = displaced_l;
+        self.displaced_r = displaced_r;
+        self.dither_l = Dither::new(seed_l);
+        self.dither_r = Dither::new(seed_r);
+        self.tail_l.clear();
+        self.tail_r.clear();
+        self.allocated_on_thread = !from_reserve;
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub fn len(&self) -> usize {
+        self.total_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_len == 0
+    }
+
+    /// Write one block of already-chain-processed stereo audio to the
+    /// bus, capturing what it displaces and applying the punch-in fade
+    /// over the first `XFADE_SAMPLES` of the pass. Both channels move
+    /// in lockstep - one length, one position - which is what lets the
+    /// journal treat the pass as a single atomic entry.
+    pub fn write_block(&mut self, tape: &mut Tape, block_l: &[f32], block_r: &[f32]) -> usize {
+        let n = block_l.len().min(block_r.len());
+        let pos = self.start + self.total_len;
+        let room = tape.len_samples().saturating_sub(pos);
+        let n = n.min(room).min(self.scratch_l.len());
+        if n == 0 {
+            return 0;
+        }
+        let base = self.total_len;
+        if self.displaced_l.len() < base + n || self.displaced_r.len() < base + n {
+            // The capture buffer is full-tape length, so this can only
+            // happen if a caller handed in something short. Refuse to
+            // write rather than lose undo data.
+            return 0;
+        }
+
+        tape.read_bus_raw(BusChannel::Left, pos, &mut self.displaced_l[base..base + n]);
+        tape.read_bus_raw(
+            BusChannel::Right,
+            pos,
+            &mut self.displaced_r[base..base + n],
+        );
+
+        for i in 0..n {
+            let pass_idx = base + i;
+            let old_l = self.displaced_l[base + i];
+            let old_r = self.displaced_r[base + i];
+            let new_l = self.dither_l.quantize(block_l[i]);
+            let new_r = self.dither_r.quantize(block_r[i]);
+            let (v_l, v_r) = if pass_idx < XFADE_SAMPLES {
+                let t = (pass_idx + 1) as f32 / XFADE_SAMPLES as f32;
+                (
+                    (f32::from(new_l) * t + f32::from(old_l) * (1.0 - t)).round() as i16,
+                    (f32::from(new_r) * t + f32::from(old_r) * (1.0 - t)).round() as i16,
+                )
+            } else {
+                (new_l, new_r)
+            };
+            self.scratch_l[i] = v_l;
+            self.scratch_r[i] = v_r;
+            if self.tail_l.len() == XFADE_SAMPLES {
+                self.tail_l.pop_front();
+                self.tail_r.pop_front();
+            }
+            self.tail_l.push_back(old_l);
+            self.tail_r.push_back(old_r);
+        }
+        tape.write_bus_raw(BusChannel::Left, pos, &self.scratch_l[..n]);
+        tape.write_bus_raw(BusChannel::Right, pos, &self.scratch_r[..n]);
+        self.total_len += n;
+        n
+    }
+
+    /// Close the pass, applying the punch-out fade to the tail of the
+    /// written region so it blends back into the displaced content, and
+    /// returning the capture buffers (truncated to what was actually
+    /// written) for the journal. Skipped at the very tape end, where
+    /// there is nothing to blend back into - same rule as `RecordPass`.
+    /// Returns `(valid_len, left, right)`.
+    pub fn finish(&mut self, tape: &mut Tape) -> (usize, Vec<i16>, Vec<i16>) {
+        self.open = false;
+        let len = self.total_len;
+        let end = self.start + len;
+        if len > 0 && end < tape.len_samples() {
+            let fade = XFADE_SAMPLES.min(len);
+            let tail_start = end - fade;
+            for (channel, scratch, tail) in [
+                (BusChannel::Left, &mut self.scratch_l, &self.tail_l),
+                (BusChannel::Right, &mut self.scratch_r, &self.tail_r),
+            ] {
+                tape.read_bus_raw(channel, tail_start, &mut scratch[..fade]);
+                let tail_len = tail.len();
+                for i in 0..fade {
+                    let t = (i + 1) as f32 / fade as f32;
+                    let new = f32::from(scratch[i]);
+                    let old = f32::from(tail[tail_len - fade + i]);
+                    scratch[i] = (new * (1.0 - t) + old * t).round() as i16;
+                }
+                tape.write_bus_raw(channel, tail_start, &scratch[..fade]);
+            }
+        }
+        // NOT truncated to `len`: these go straight back to the
+        // journal's reserve, and a short buffer would leave the next
+        // bounce unable to use it. `len` travels alongside instead.
+        let left = std::mem::take(&mut self.displaced_l);
+        let right = std::mem::take(&mut self.displaced_r);
+        self.total_len = 0;
+        (len, left, right)
     }
 }
 
