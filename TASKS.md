@@ -1027,7 +1027,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       arithmetic in the same order). All existing flutter tests pass
       unmodified; golden render byte-identical (the split is bit-exact,
       no regen needed). Full gate green, all four feature combos.
-- [ ] M7.2 porta-dsp: split-chain builder on TapeCharacter - pre-
+- [x] M7.2 porta-dsp: split-chain builder on TapeCharacter - pre-
       flutter Chain [Saturation, Hiss, Bandwidth], shared
       StereoFlutter, post-flutter Chain ([Crush] if enabled, empty
       otherwise), with a HISS_STAGE constant kept beside the builder
@@ -1042,6 +1042,17 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       renders identical output to freshly built ones with the same
       seeds - the reseed_chain_matches_a_freshly_built_one property,
       stereo; the empty post-flutter chain resets/processes safely)
+      Done 2026-08-23. build_split_chain returns (pre, post) per
+      channel; build_stereo_flutter supplies the shared middle;
+      reseed_split_chain resets both halves then reseeds hiss at
+      SPLIT_HISS_STAGE (its own constant beside the builder - equal to
+      HISS_STAGE today by coincidence, deliberately not by reference);
+      StereoFlutter::reseed clears both rings + writes + modulator,
+      pinned to exactly Flutter::reset's state set. Two new tests: the
+      stereo reused-equals-fresh property (dirties the setup with a
+      different pass first, distinct per-channel seeds, distinct
+      content per channel), and empty-post-half safety + crush landing
+      there when enabled. Full gate green, golden byte-identical.
 - [ ] M7.3 porta-engine: Tape gains the stereo bounce buss - an
       explicit dedicated field (NOT an appended Tape.tracks element:
       0..NUM_TRACKS loops would silently skip it), fixed cassette

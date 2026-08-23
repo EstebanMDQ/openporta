@@ -17,7 +17,7 @@
 
 use crate::crush::{Crush, CrushParams};
 use crate::filter::Bandwidth;
-use crate::flutter::Flutter;
+use crate::flutter::{Flutter, StereoFlutter};
 use crate::noise::Hiss;
 use crate::saturation::Saturation;
 use crate::{AudioProcessor, Chain};
@@ -119,6 +119,63 @@ impl TapeCharacter {
         chain.reset();
         chain.reseed_stage(Self::HISS_STAGE, pass_seed ^ 0x5f5f_5f5f);
         chain.reseed_stage(Self::FLUTTER_STAGE, pass_seed);
+    }
+
+    /// Hiss's position in the *split* pre-flutter chain (change 001,
+    /// M7.2) - kept beside `build_split_chain` for the same
+    /// can't-drift reason `HISS_STAGE`/`FLUTTER_STAGE` sit beside
+    /// `build_chain`. (It happens to equal `HISS_STAGE` today because
+    /// flutter sits after bandwidth in the unsplit order; a separate
+    /// constant so that stays a coincidence, not a dependency.)
+    const SPLIT_HISS_STAGE: usize = 1;
+
+    /// One channel's halves of a split bounce chain (change 001,
+    /// REQ-402): everything before flutter, and everything after it.
+    /// The stereo pass runs, per channel: pre -> (shared
+    /// `StereoFlutter`) -> post, with `build_stereo_flutter` supplying
+    /// the shared middle. Stage order matches `build_chain` exactly
+    /// (Saturation, Hiss, Bandwidth | Flutter | Crush) - the module
+    /// doc's signal-path reasoning is unchanged, the chain is just cut
+    /// where flutter sits. `pass_seed` is this channel's own (REQ-702's
+    /// per-channel derivation happens at the engine; hiss's `^`
+    /// constant here matches `build_chain`'s). The post half is EMPTY
+    /// when crush is off - `Chain`'s own reset/process iterate whatever
+    /// stages exist, so the empty case is safe by construction.
+    /// Off-thread only, like `build_chain`: build once at cassette
+    /// open/create, reseed per pass via `reseed_split_chain`.
+    pub fn build_split_chain(&self, pass_seed: u32) -> (Chain, Chain) {
+        let pre: Vec<Box<dyn crate::AudioProcessor>> = vec![
+            Box::new(Saturation::new(self.drive_db)),
+            Box::new(Hiss::new(self.hiss_dbfs, pass_seed ^ 0x5f5f_5f5f)),
+            Box::new(Bandwidth::new(self.lpf_cutoff_hz, self.hpf_cutoff_hz)),
+        ];
+        let mut post: Vec<Box<dyn crate::AudioProcessor>> = Vec::new();
+        if let Some(params) = self.crush {
+            post.push(Box::new(Crush::new(params)));
+        }
+        (Chain::new(pre), Chain::new(post))
+    }
+
+    /// The shared stereo flutter for a bounce pass. Seeded at channel
+    /// term 0 by convention (the caller passes that channel's seed):
+    /// there is exactly one modulator, so which channel's seed it uses
+    /// must be a fixed choice, not an implementation coin-flip REQ-702's
+    /// bit-reproducibility would silently depend on.
+    pub fn build_stereo_flutter(&self, pass_seed: u32) -> StereoFlutter {
+        StereoFlutter::new(self.flutter_rate_hz, self.flutter_depth_cents, pass_seed)
+    }
+
+    /// Realtime-safe per-pass reset for one channel's split halves -
+    /// `reseed_chain`'s exact shape, minus flutter (that's the shared
+    /// `StereoFlutter::reseed`, called once, not per channel): reset
+    /// BOTH sub-chains (Bandwidth's biquads live in the pre half and
+    /// must not carry over between passes; the post half may be empty,
+    /// which resets as a no-op), then reseed Hiss, the only seeded
+    /// stage in either half.
+    pub fn reseed_split_chain(&self, pre: &mut Chain, post: &mut Chain, pass_seed: u32) {
+        pre.reset();
+        post.reset();
+        pre.reseed_stage(Self::SPLIT_HISS_STAGE, pass_seed ^ 0x5f5f_5f5f);
     }
 }
 
@@ -233,6 +290,85 @@ mod tests {
             from_reuse, fresh,
             "reseeding a used chain must match a fresh build_chain with the same seed"
         );
+    }
+
+    #[test]
+    fn reseeding_a_split_setup_matches_a_freshly_built_one() {
+        // The stereo analogue of reseed_chain_matches_a_freshly_built_one
+        // (change 001, M7.2): a bounce pass setup reused across passes -
+        // reset both sub-chains per channel, reseed hiss, reseed the
+        // shared StereoFlutter - must be indistinguishable from building
+        // everything fresh with the same seeds, regardless of what ran
+        // through it before. Anything left over (Bandwidth biquads, the
+        // flutter delay rings - both real bugs a review caught being
+        // dropped from an earlier version of the reseed sequence) breaks
+        // this first.
+        let c = TapeCharacter::new(42);
+        let (seed_l, seed_r) = (3u32, 4u32); // channel-term derivation is the engine's job
+        let input_l = sine(440.0, -6.0, 24_000);
+        let input_r = sine(330.0, -6.0, 24_000);
+
+        let render = |pre_l: &mut Chain,
+                      post_l: &mut Chain,
+                      pre_r: &mut Chain,
+                      post_r: &mut Chain,
+                      sf: &mut crate::flutter::StereoFlutter| {
+            let mut l = input_l.clone();
+            let mut r = input_r.clone();
+            for (cl, cr) in l.chunks_mut(512).zip(r.chunks_mut(512)) {
+                pre_l.process(cl);
+                pre_r.process(cr);
+                sf.process(cl, cr);
+                post_l.process(cl);
+                post_r.process(cr);
+            }
+            (l, r)
+        };
+
+        // Reused path: build once, dirty it with a different pass, then
+        // reseed back to the target seeds.
+        let (mut pre_l, mut post_l) = c.build_split_chain(1);
+        let (mut pre_r, mut post_r) = c.build_split_chain(2);
+        let mut sf = c.build_stereo_flutter(1);
+        let _ = render(&mut pre_l, &mut post_l, &mut pre_r, &mut post_r, &mut sf);
+        c.reseed_split_chain(&mut pre_l, &mut post_l, seed_l);
+        c.reseed_split_chain(&mut pre_r, &mut post_r, seed_r);
+        sf.reseed(seed_l); // channel term 0 = left, by convention
+        let reused = render(&mut pre_l, &mut post_l, &mut pre_r, &mut post_r, &mut sf);
+
+        // Fresh path: everything built directly at the target seeds.
+        let (mut fpre_l, mut fpost_l) = c.build_split_chain(seed_l);
+        let (mut fpre_r, mut fpost_r) = c.build_split_chain(seed_r);
+        let mut fsf = c.build_stereo_flutter(seed_l);
+        let fresh = render(
+            &mut fpre_l,
+            &mut fpost_l,
+            &mut fpre_r,
+            &mut fpost_r,
+            &mut fsf,
+        );
+
+        assert_eq!(reused, fresh, "reused+reseeded must match freshly built");
+    }
+
+    #[test]
+    fn empty_post_flutter_chain_is_safe_and_crush_lands_there() {
+        let plain = TapeCharacter::new(1); // crush: None
+        let (_, mut post) = plain.build_split_chain(7);
+        let mut block = sine(440.0, -6.0, 512);
+        let before = block.clone();
+        post.reset(); // must not panic on empty
+        post.process(&mut block); // identity on empty
+        assert_eq!(block, before, "empty post half must pass audio untouched");
+
+        let mut crushed = plain;
+        crushed.crush = Some(CrushParams {
+            bits: 4,
+            rate_hz: 12_000.0,
+        });
+        let (_, mut post) = crushed.build_split_chain(7);
+        post.process(&mut block);
+        assert_ne!(block, before, "crush must land in the post half");
     }
 
     #[test]

@@ -234,6 +234,22 @@ impl StereoFlutter {
         Self::new(2.5, 12.0, seed)
     }
 
+    /// Fresh state for a new pass (change 001's numbered per-pass
+    /// sequence, step 3): clears BOTH delay rings and write indices AND
+    /// reseeds the shared modulator. The invariant this is held to:
+    /// clear exactly the state `Flutter::reset` clears (`ring`, `write`,
+    /// `wow_phase`, `walk`, `walk_lp`, `state`), just distributed
+    /// across three objects - anything less bleeds ~CENTRE samples of
+    /// the previous bounce into the next pass's punch-in. An inherent
+    /// method, not a trait override: this type isn't an
+    /// `AudioProcessor`. No allocation - callable from the realtime
+    /// thread, same as `reseed_chain`.
+    pub fn reseed(&mut self, seed: u32) {
+        self.left.reset();
+        self.right.reset();
+        self.modulator.reseed(seed);
+    }
+
     /// Both channels through their own delay line at the same
     /// modulation. Processes `min(l.len(), r.len())` samples - callers
     /// hand in equal-length blocks; the min is defensive, not an API.
