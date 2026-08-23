@@ -86,8 +86,27 @@ pub struct Mixer {
     /// unlike pulling the fader down, muting doesn't disturb the gain
     /// you'll get back when you unmute.
     muted: [bool; NUM_TRACKS],
+    /// Keeps a track out of the *monitor* sum while leaving it at full
+    /// weight in the print sum and leaving its meter live (REQ-408).
+    /// Set only while a bounce pass is open: the tracks are already
+    /// inside the bus's printed copy, so summing them again would be an
+    /// audible double. Deliberately NOT folded into `target` the way
+    /// mute is - that would take them out of the print too, which is
+    /// the opposite of what a bounce needs.
+    excluded_from_sum: [bool; NUM_TRACKS],
     left: [Smoothed; NUM_TRACKS],
     right: [Smoothed; NUM_TRACKS],
+    /// The bounce bus's own fader/mute (REQ-409): stereo already, so no
+    /// pan - one gain for both channels.
+    bus_fader_db: f32,
+    bus_muted: bool,
+    bus_gain: Smoothed,
+    /// The master fader, ramped on its own instead of folded into each
+    /// track's gain (change 001). Same click-free guarantee as before,
+    /// applied once at the end rather than baked into every track -
+    /// which is what keeps it out of anything printed to tape
+    /// (REQ-406).
+    master: Smoothed,
     /// Peak of each track's contribution (post-fader, pre-pan) in the
     /// most recent block, and of the summed master output. A meter
     /// reading, not audio - fine to read from a UI timer, updated for
@@ -112,8 +131,13 @@ impl Mixer {
             pan: [0.0; NUM_TRACKS],
             master_db: 0.0,
             muted: [false; NUM_TRACKS],
+            excluded_from_sum: [false; NUM_TRACKS],
             left: [Smoothed::settled(l); NUM_TRACKS],
             right: [Smoothed::settled(r); NUM_TRACKS],
+            bus_fader_db: 0.0,
+            bus_muted: false,
+            bus_gain: Smoothed::settled(1.0),
+            master: Smoothed::settled(1.0),
             track_peak: [0.0; NUM_TRACKS],
             master_peak: (0.0, 0.0),
         }
@@ -137,6 +161,29 @@ impl Mixer {
 
     pub fn set_master_db(&mut self, db: f32) {
         self.master_db = db;
+    }
+
+    /// Exclude a track from the audible/monitor sum while leaving it in
+    /// the print sum and on its meter (REQ-408). Only an open bounce
+    /// pass sets this.
+    pub fn set_excluded_from_sum(&mut self, track: usize, excluded: bool) {
+        self.excluded_from_sum[track] = excluded;
+    }
+
+    pub fn set_bus_fader_db(&mut self, db: f32) {
+        self.bus_fader_db = db;
+    }
+
+    pub fn bus_fader_db(&self) -> f32 {
+        self.bus_fader_db
+    }
+
+    pub fn set_bus_muted(&mut self, muted: bool) {
+        self.bus_muted = muted;
+    }
+
+    pub fn is_bus_muted(&self) -> bool {
+        self.bus_muted
     }
 
     pub fn fader_db(&self, track: usize) -> f32 {
@@ -164,6 +211,10 @@ impl Mixer {
         (amp_to_db(self.master_peak.0), amp_to_db(self.master_peak.1))
     }
 
+    /// A track's pre-master stereo gain. The master is deliberately NOT
+    /// folded in here any more (change 001, REQ-406): it rides its own
+    /// ramp in `finish_mix`, so nothing the master does can reach a
+    /// signal on its way to tape.
     fn target(&self, track: usize) -> (f32, f32) {
         if self.muted[track] {
             // Folded into the same smoothed target as the fader, so
@@ -171,23 +222,49 @@ impl Mixer {
             // instant cut - no separate click-avoidance path needed.
             return (0.0, 0.0);
         }
-        let amp = db_to_amp(self.fader_db[track]) * db_to_amp(self.master_db);
+        let amp = db_to_amp(self.fader_db[track]);
         let (l, r) = pan_gains(self.pan[track]);
         (amp * l, amp * r)
     }
 
-    /// Mix one block of the four track signals into stereo out. All
-    /// slices must share the same length.
-    pub fn mix_block(
+    fn bus_target(&self) -> f32 {
+        if self.bus_muted {
+            0.0
+        } else {
+            db_to_amp(self.bus_fader_db)
+        }
+    }
+
+    /// Phase 1 (change 001): sum the four tracks, pre-master, ticking
+    /// each track's ramps **exactly once per sample** whatever else is
+    /// going on.
+    ///
+    /// Writes two sums from the same per-sample scaled values:
+    /// `mon_*` is the audible/monitor sum, which skips tracks flagged
+    /// `set_excluded_from_sum`. `print`, when given, is the ungated
+    /// sum: every track at full weight regardless of that flag, because
+    /// exclusion is about audibility, not about what gets printed
+    /// (REQ-406 vs REQ-408 need opposite things from the same tracks
+    /// during a bounce, which is why there are two sums and not one).
+    ///
+    /// Both sums are overwritten, not accumulated into.
+    pub fn sum_tracks(
         &mut self,
         inputs: &[&[f32]; NUM_TRACKS],
-        out_l: &mut [f32],
-        out_r: &mut [f32],
+        mon_l: &mut [f32],
+        mon_r: &mut [f32],
+        mut print: Option<(&mut [f32], &mut [f32])>,
     ) {
-        let len = out_l.len();
-        assert_eq!(out_r.len(), len);
-        out_l.fill(0.0);
-        out_r.fill(0.0);
+        let len = mon_l.len();
+        assert_eq!(mon_r.len(), len);
+        mon_l.fill(0.0);
+        mon_r.fill(0.0);
+        if let Some((pl, pr)) = print.as_mut() {
+            assert_eq!(pl.len(), len);
+            assert_eq!(pr.len(), len);
+            pl.fill(0.0);
+            pr.fill(0.0);
+        }
         if len == 0 {
             return;
         }
@@ -200,38 +277,102 @@ impl Mixer {
             // balance independent of the overall volume knob. Muted
             // reads as silent too - the meter should match what's
             // actually contributing to the mix, not the fader value
-            // muting is deliberately not disturbing.
+            // muting is deliberately not disturbing. Exclusion does
+            // NOT silence the meter (REQ-408): the whole point is
+            // riding these faders while the bounce runs.
             let fader_amp = if self.muted[t] {
                 0.0
             } else {
                 db_to_amp(self.fader_db[t])
             };
+            let excluded = self.excluded_from_sum[t];
             let mut peak = 0.0f32;
             for (n, &s) in input.iter().enumerate() {
-                out_l[n] += s * self.left[t].tick();
-                out_r[n] += s * self.right[t].tick();
+                // Ticked unconditionally, before any gating: skipping
+                // these for an excluded track would freeze its ramp for
+                // the whole pass and snap it at punch-out - a real
+                // click (REQ-602) whose duration would depend on block
+                // size (REQ-203).
+                let gl = self.left[t].tick();
+                let gr = self.right[t].tick();
+                let (sl, sr) = (s * gl, s * gr);
+                if !excluded {
+                    mon_l[n] += sl;
+                    mon_r[n] += sr;
+                }
+                if let Some((pl, pr)) = print.as_mut() {
+                    pl[n] += sl;
+                    pr[n] += sr;
+                }
                 peak = peak.max(s.abs());
             }
             self.track_peak[t] = peak * fader_amp;
         }
-        // Hard safety ceiling on the summed output, not just the
-        // offline WAV writer's own clamp (render.rs quantizes with one
-        // too - this makes the live monitoring path match it instead
-        // of being the one place nothing stops an extreme value from
-        // reaching a real speaker or headphones). Four tracks at up to
-        // +12dB of fader gain each plus the master can genuinely sum
-        // past 0dBFS; this is the last line of defense before that
-        // reaches hardware, not a substitute for sane gain staging.
-        for s in out_l.iter_mut() {
-            *s = s.clamp(-1.0, 1.0);
+    }
+
+    /// Phase 2 (change 001): fold the bounce bus into the monitor sum
+    /// at its own smoothed fader/mute (no pan - it is already stereo),
+    /// apply the master ramp, and clamp. `out_*` arrive holding phase
+    /// 1's monitor sum and leave holding the finished output - the only
+    /// place `out_l`/`out_r` are written.
+    ///
+    /// The bus gain and the master both tick exactly once per sample
+    /// here, including when `bus` is `None` - a frozen ramp would break
+    /// block-size invariance just as surely as a double-ticked one.
+    pub fn finish_mix(
+        &mut self,
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+        bus: Option<(&[f32], &[f32])>,
+    ) {
+        let len = out_l.len();
+        assert_eq!(out_r.len(), len);
+        if len == 0 {
+            return;
         }
-        for s in out_r.iter_mut() {
-            *s = s.clamp(-1.0, 1.0);
+        if let Some((bl, br)) = bus {
+            assert_eq!(bl.len(), len);
+            assert_eq!(br.len(), len);
+        }
+        self.bus_gain.set_target(self.bus_target());
+        self.master.set_target(db_to_amp(self.master_db));
+        for n in 0..len {
+            let bg = self.bus_gain.tick();
+            if let Some((bl, br)) = bus {
+                out_l[n] += bl[n] * bg;
+                out_r[n] += br[n] * bg;
+            }
+            let m = self.master.tick();
+            // Hard safety ceiling on the summed output, not just the
+            // offline WAV writer's own clamp (render.rs quantizes with
+            // one too - this makes the live monitoring path match it
+            // instead of being the one place nothing stops an extreme
+            // value from reaching a real speaker or headphones). Four
+            // tracks at up to +12dB of fader gain each plus the bus and
+            // the master can genuinely sum past 0dBFS; this is the last
+            // line of defense before that reaches hardware, not a
+            // substitute for sane gain staging.
+            out_l[n] = (out_l[n] * m).clamp(-1.0, 1.0);
+            out_r[n] = (out_r[n] * m).clamp(-1.0, 1.0);
         }
         self.master_peak = (
             out_l.iter().fold(0.0f32, |acc, &s| acc.max(s.abs())),
             out_r.iter().fold(0.0f32, |acc, &s| acc.max(s.abs())),
         );
+    }
+
+    /// Mix one block of the four track signals into stereo out. All
+    /// slices must share the same length. The ordinary playback path:
+    /// both phases back to back with nothing between them, which is
+    /// exactly what this did before it was split.
+    pub fn mix_block(
+        &mut self,
+        inputs: &[&[f32]; NUM_TRACKS],
+        out_l: &mut [f32],
+        out_r: &mut [f32],
+    ) {
+        self.sum_tracks(inputs, out_l, out_r, None);
+        self.finish_mix(out_l, out_r, None);
     }
 }
 
@@ -305,6 +446,162 @@ mod tests {
         assert_no_clicks!(&left);
         // And the jump actually happened.
         assert!(rms_dbfs(&left[..4800]) - rms_dbfs(&left[43_200..]) > 20.0);
+    }
+
+    #[test]
+    fn master_jump_does_not_click() {
+        // The master used to ride each track's own ramp (it was folded
+        // into `target`); change 001 gave it its own. That refactor
+        // would have been free to drop the smoothing entirely and
+        // nothing here would have caught it - this is the guard.
+        let mut m = Mixer::new();
+        let s = sine(440.0, -6.0, 4800);
+        let mut left = Vec::new();
+        for block in 0..10 {
+            if block == 5 {
+                m.set_master_db(-30.0); // hard jump mid-stream
+            }
+            let (l, _) = mix_once(&mut m, 0, &s);
+            left.extend(l);
+        }
+        assert_no_clicks!(&left);
+        assert!(rms_dbfs(&left[..4800]) - rms_dbfs(&left[43_200..]) > 20.0);
+    }
+
+    #[test]
+    fn excluded_track_leaves_the_monitor_sum_but_not_the_print_or_its_meter() {
+        // REQ-408's three-way split, the reason there are two sums.
+        let mut m = Mixer::new();
+        let s = sine(440.0, -6.0, 512);
+        let quiet = silence(512);
+        let inputs: [&[f32]; NUM_TRACKS] = [&s, &quiet, &quiet, &quiet];
+
+        let (mut ml, mut mr) = (vec![0.0; 512], vec![0.0; 512]);
+        let (mut pl, mut pr) = (vec![0.0; 512], vec![0.0; 512]);
+
+        m.set_excluded_from_sum(0, true);
+        m.sum_tracks(&inputs, &mut ml, &mut mr, Some((&mut pl, &mut pr)));
+
+        assert!(
+            ml.iter().all(|&x| x == 0.0),
+            "an excluded track must be absent from the monitor sum"
+        );
+        assert!(
+            pl.iter().any(|&x| x != 0.0),
+            "an excluded track must still be at full weight in the print sum"
+        );
+        assert!(
+            m.track_level_db(0) > -20.0,
+            "an excluded track's meter must stay live, got {}",
+            m.track_level_db(0)
+        );
+
+        // Un-excluded, the monitor sum matches the print sum exactly.
+        m.set_excluded_from_sum(0, false);
+        m.sum_tracks(&inputs, &mut ml, &mut mr, Some((&mut pl, &mut pr)));
+        assert_eq!(ml, pl, "with nothing excluded the two sums must agree");
+    }
+
+    #[test]
+    fn excluding_a_track_does_not_freeze_its_ramp() {
+        // The ramps must keep ticking while excluded, or they'd snap to
+        // their live value at punch-out - a click whose length depends
+        // on block size (REQ-602/203). Move a fader while excluded,
+        // then un-exclude: the gain must already be there, not ramping.
+        let mut m = Mixer::new();
+        let s = sine(440.0, -6.0, 4800);
+        let quiet = silence(4800);
+        let inputs: [&[f32]; NUM_TRACKS] = [&s, &quiet, &quiet, &quiet];
+        let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+
+        m.set_excluded_from_sum(0, true);
+        m.set_fader_db(0, -20.0);
+        // Long enough for the 5ms ramp to settle several times over.
+        m.sum_tracks(&inputs, &mut l, &mut r, None);
+        m.set_excluded_from_sum(0, false);
+        m.sum_tracks(&inputs, &mut l, &mut r, None);
+
+        // Already at -20dB from the first sample: no audible ramp-in.
+        let head = rms_dbfs(&l[..240]);
+        let tail = rms_dbfs(&l[4560..]);
+        assert!(
+            (head - tail).abs() < 1.0,
+            "gain was still ramping after un-exclude: head {head:.1} vs tail {tail:.1}"
+        );
+    }
+
+    #[test]
+    fn split_phases_are_block_size_invariant() {
+        // REQ-203 across the new two-phase path, at the awkward sizes
+        // the task calls for (1 and 37 are deliberately not divisors).
+        let render = |block: usize| {
+            let mut m = Mixer::new();
+            m.set_fader_db(1, -4.0);
+            m.set_pan(1, -0.3);
+            m.set_master_db(-2.0);
+            let s = sine(440.0, -6.0, 2048);
+            let quiet = silence(2048);
+            let mut out = Vec::new();
+            let mut done = 0;
+            while done < 2048 {
+                let n = block.min(2048 - done);
+                let inputs: [&[f32]; NUM_TRACKS] = [
+                    &s[done..done + n],
+                    &s[done..done + n],
+                    &quiet[..n],
+                    &quiet[..n],
+                ];
+                let (mut l, mut r) = (vec![0.0; n], vec![0.0; n]);
+                m.mix_block(&inputs, &mut l, &mut r);
+                out.extend(l);
+                done += n;
+            }
+            out
+        };
+        let reference = render(512);
+        for block in [1usize, 37, 64] {
+            assert_eq!(
+                render(block),
+                reference,
+                "block size {block} changed the render"
+            );
+        }
+    }
+
+    #[test]
+    fn bus_sums_in_at_its_own_fader_and_mute() {
+        // REQ-409 groundwork: the bus is part of the mix, at its own
+        // gain, with no pan.
+        let mut m = Mixer::new();
+        let quiet = silence(4800);
+        let inputs: [&[f32]; NUM_TRACKS] = [&quiet, &quiet, &quiet, &quiet];
+        let bus = sine(440.0, -6.0, 4800);
+
+        let run = |m: &mut Mixer| {
+            let (mut l, mut r) = (vec![0.0; 4800], vec![0.0; 4800]);
+            m.sum_tracks(&inputs, &mut l, &mut r, None);
+            m.finish_mix(&mut l, &mut r, Some((&bus, &bus)));
+            (rms_dbfs(&l[2400..]), rms_dbfs(&r[2400..]))
+        };
+
+        let (unity_l, unity_r) = run(&mut m);
+        assert!(unity_l > -20.0, "bus must reach the output");
+        assert!(
+            (unity_l - unity_r).abs() < 0.01,
+            "no pan: both channels equal"
+        );
+
+        m.set_bus_fader_db(-12.0);
+        let (cut, _) = run(&mut m);
+        assert!(
+            (unity_l - cut - 12.0).abs() < 0.5,
+            "bus fader should cut ~12dB, got {:.1}",
+            unity_l - cut
+        );
+
+        m.set_bus_muted(true);
+        let (muted, _) = run(&mut m);
+        assert!(muted < -100.0, "muted bus must be silent, got {muted:.1}");
     }
 
     #[test]

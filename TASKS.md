@@ -1096,7 +1096,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       end, per-channel dirty tracking that leaves the other channel and
       all 4 tracks clean, both-directions audio isolation (REQ-306's
       symmetry clause), and short-tail chunk access. Full gate green.
-- [ ] M7.4 porta-engine: Mixer::mix_block split into sum_tracks (ticks
+- [x] M7.4 porta-engine: Mixer::mix_block split into sum_tracks (ticks
       each track's fader/pan ramps exactly once per sample; produces
       the monitor sum gated by a new excluded-from-sum-but-still-
       metered flag AND the ungated print sum from the same scaled
@@ -1112,6 +1112,24 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       meter still reads; golden stays within its 3 LSB tolerance - if
       the fp reordering exceeds it, re-bless here with a note and
       notification, and M7.9's event then covers only the op change)
+      Done 2026-08-23. target() no longer folds in the master; master
+      and the bus each got their own Smoothed. sum_tracks ticks both
+      per-track ramps unconditionally BEFORE any gating, then routes
+      the same scaled value into the monitor sum (gated) and the print
+      sum (never gated) - so exclusion can't freeze a ramp. finish_mix
+      adds the bus at its own gain (no pan), ticks the master once per
+      sample, clamps, and is the only writer of out_l/out_r; the bus
+      gain ticks even when no bus buffers are passed, same
+      no-frozen-ramp reason. mix_block is now a two-line wrapper, so
+      engine.rs is untouched this task and every combo stays green.
+      5 new tests (master click, the three-way exclusion split, ramp-
+      not-frozen across un-exclude, block-size invariance at 1/37/64
+      vs 512, bus fader/mute/no-pan); the 12 existing mixer tests pass
+      unmodified. GOLDEN: the fp reordering does change the render but
+      stays INSIDE the 3 LSB tolerance (verified by blessing to a temp
+      copy and diffing, then restoring) - so no re-bless here, and
+      M7.9's regeneration event still covers only the op change, as
+      the task hoped. Full gate green, all four feature combos.
 - [ ] M7.5 porta-engine: journal stereo entry + bus reserve.
       Entry.right_track: Option<usize> #[serde(default)] (None = every
       existing single-channel entry; len stays per-channel);
