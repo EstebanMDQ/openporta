@@ -3,8 +3,9 @@
 ## Motivation
 
 Requested directly by the owner while using the app, then reshaped
-eleven times after review found real design holes (see "History" at the
-end - this is now v12). The underlying problems are unchanged:
+twelve times after review found real design holes (see "History" at the
+end - this is now v13, the first revision after an approving review).
+The underlying problems are unchanged:
 
 1. **Stereo information is lost.** Today's bounce is a mono sum of
    tracks 1-3 onto track 4; anything panned comes out center.
@@ -582,6 +583,17 @@ restore logic follows.
   missing buss files as "never bounced yet" (all-zero, matching how a
   fresh cassette's tracks already start) rather than an error, so every
   cassette saved before this feature exists opens unchanged.
+  **REQ-409's fader and mute persist in the manifest (a twelfth review
+  found this missing entirely - without it, save-and-reopen silently
+  resets the buss to unity/unmuted, and by this document's own analysis
+  the buss's mute is destructively load-bearing on the very next bounce,
+  with no test to catch a field that was never added)**: `Manifest`
+  gains `bounce_fader_db: f32` and `bounce_muted: bool`, both
+  `#[serde(default)]` (unity / unmuted for every pre-existing cassette -
+  the same additive-field precedent `Manifest::muted` already set), and
+  `apply_to`/`capture_from` carry them in and out exactly as they do the
+  per-track `fader_db`/`muted`. A mix decision, persisted like fader/pan
+  - `project.rs`'s own words for why `muted` persists apply verbatim.
 - **REQ-503 (journal format stays backward compatible)**: `Entry` gains
   one additive field, `right_track: Option<usize>` (`#[serde(default)]`,
   matching the precedent already used for `Manifest::muted`) - `None`
@@ -1067,13 +1079,21 @@ here. Four new ops, matching the shape of what's already there:
   `build_chain` actually puts it is where `StereoFlutter` goes too.)
   **Construction and reseeding, stated explicitly (a ninth review found
   this whole bullet never says where the buss's chains are built or how
-  they're reseeded per pass without allocating)**: each channel's split
-  chain is built once, off the realtime thread, the same moment and by
-  the same reasoning `Engine`'s own per-track chains now are (see
-  "Realtime-safe allocation" above) - at cassette open/create, if the
-  cassette's manifest has ever had the buss armed, or lazily the first
-  time the buss is armed (either is fine; what matters is *not* on the
-  realtime thread). Reseeding per pass reuses the same mechanism this
+  they're reseeded per pass without allocating; a twelfth found the
+  previous version's two build-site options were *both* wrong - "if the
+  manifest has ever had the buss armed" depends on manifest state that
+  deliberately doesn't exist (arm is session-transient, never saved,
+  `project.rs`'s own rule), and "lazily the first time the buss is
+  armed" runs on the realtime thread, since arming isn't a blocking
+  command - the identical REQ-902 violation rounds 9-10 diagnosed and
+  fixed in `Engine::record()`, reintroduced in prose one bullet over
+  from where round 11 caught the same mistake)**: both per-channel split
+  chains are built **unconditionally** at cassette open/create, exactly
+  as `Engine`'s constructor already builds all four track chains with a
+  throwaway seed (`chains: (0..NUM_TRACKS).map(|_|
+  character.build_chain(0))`, `engine.rs:100`) - no conditions, no
+  laziness, nothing for a later reader to reinterpret as an
+  optimization opportunity. Reseeding per pass reuses the same mechanism this
   proposal's REQ-902 audit already added and shipped for ordinary tracks
   - `AudioProcessor::reseed`/`Chain::reseed_stage`. **The full per-pass
   sequence, stated as a sequence (an eleventh review found the previous
@@ -1267,7 +1287,11 @@ here. Four new ops, matching the shape of what's already there:
   converged - a cut, not a boost, since a boost would scale the dither
   error above the RMS bound below and the claim doesn't hold for that
   case), and bounce a region long enough that a middle stretch clear of
-  *both* crossfade windows exists, **ending short of the tape end**
+  *both* crossfade windows exists, **lying entirely inside the region
+  the priming bounce wrote** (a twelfth review caught that a measured
+  pass running past the primed region returns to the silence-vs-silence
+  vacuity the priming was added to eliminate, for its unprimed tail),
+  and **ending short of the tape end**
   (needed for the replay step anyway, and `finish` skips its out-fade
   entirely at the tape end - see "Monitoring" above - so stopping short
   is also what makes the punch-out boundary exist to exclude). Capture
@@ -1299,11 +1323,16 @@ here. Four new ops, matching the shape of what's already there:
   `mute_silences_a_track_without_touching_its_fader` already asserts
   exactly that - so "meters not silent" can never hold there, for a
   reason unrelated to REQ-408)**: tracks 1-4 **unmuted** and carrying
-  real signal, a bounce pass open, assert each track's `track_level_db`
-  reads above the meter floor while the same block's audible output
-  contains no tracks-1-4 contribution - the exclude-flag-vs-meter
-  separation `sum_tracks` exists to provide, exercised directly
-  (REQ-408's metering clause).
+  real signal, **the buss muted** (a twelfth review pointed out the
+  clean measurable form: during a bounce the audible output *does*
+  carry tracks 1-4's material via the buss's printed `W`, so "output
+  contains no tracks-1-4 contribution" isn't directly assertable -
+  muting the buss makes the audible output exactly silent, `g = 0`,
+  while the exclude flag is what's keeping the tracks out), a bounce
+  pass open: assert each track's `track_level_db` reads above the meter
+  floor while the block's audible output is silent - the
+  exclude-flag-vs-meter separation `sum_tracks` exists to provide,
+  exercised directly (REQ-408's metering clause).
 - **New test**: one Undo press after a bounce restores both channels
   atomically - no reachable state with one channel reverted and the
   other not (REQ-502/505).
@@ -1348,7 +1377,13 @@ here. Four new ops, matching the shape of what's already there:
   `current` as the new redo payload) are each sized the same way.
   Three separate, temporary, whole-entry allocations, all live briefly
   at once: 3 x 345.6MB = **~1037MB**, on top of the steady-state figure
-  above, only while that specific operation runs.
+  above, only while that specific operation runs. (For inventory
+  completeness, a twelfth review also noted the *flush* transient:
+  `write_payload_chunks` allocates a byte buffer per chunk at save
+  time, up to ~346MB for a full stereo payload with both channels live
+  - off the realtime thread, and immaterial inside this section's
+  stated generous-additive-not-tight-bound framing against ~3GB of
+  margin, but named so the inventory has no known omissions.)
 
   **Worst-case peak: ~1774MB + ~1037MB ≈ ~2.8GB.** Deliberately a
   generous, additive estimate, not a tight bound - the only claim that
@@ -1394,6 +1429,10 @@ here. Four new ops, matching the shape of what's already there:
   browser, destructive by design) doesn't especially prioritize: the
   most recent bounce and a modest amount of ordinary track history
   staying undoable is the realistic guarantee, not "everything, always."
+- **`Manifest` gains `bounce_fader_db`/`bounce_muted`** (with
+  `apply_to`/`capture_from` plumbing and a save-reopen roundtrip test) -
+  REQ-409's persistence, see the REQ-801/802 bullet above for the full
+  rationale.
 - `TASKS.md` M3.1 (bounce, currently `[x]`) and its verify text need
   updating - a re-open of a done milestone task.
 - `openspec/spec.md` itself needs every REQ above rewritten once this
@@ -1755,7 +1794,7 @@ self-contradictory allocation site ("alongside per-pass setup," which
 this document itself says runs on the realtime thread) are also
 corrected.
 
-**v12 (this revision)**: an eleventh review verified every one of round
+**v12**: an eleventh review verified every one of round
 10's fixes against the code (including the crossfade mechanics in
 `write_block`/`finish` line by line) and found two blocking problems,
 both in material earlier rounds had already touched. The chain-splitting
@@ -1798,5 +1837,35 @@ than leaving the un-scaled figure with silent 2x slack. The
 `Vec`s, not fixed arrays - the third array-vs-Vec imprecision in as
 many rounds) and the reviewer's closing nit (REQ-302's crossfade lives
 on tape content only; the monitor slot is never faded, at either
-boundary, for buss and ordinary tracks alike) are also folded in. Ready
-for a twelfth spec-reviewer pass.
+boundary, for buss and ordinary tracks alike) are also folded in.
+
+**v13 (this revision)**: the twelfth review returned the first
+approving verdict - **APPROVE WITH NOTES** - after verifying every one
+of round 11's seven fixes against the code line by line, independently
+re-deriving the dither arithmetic and the undo transient, and running
+the first fully clean consistency sweep over every numeric figure in
+the document (the standing stale-value failure mode finally produced
+nothing). Zero architectural findings remained; the reviewer stated
+explicitly this should not go to a thirteenth review round. Two medium
+notes folded in here: the buss chains' build site offered two options
+and both were wrong (manifest-conditional build depends on arm state
+the manifest deliberately never persists; lazy-on-arm runs on the
+realtime thread since arming isn't blocking - the same REQ-902 mistake
+in prose that rounds 9-10 fixed in code, caught one bullet over from
+where round 11 caught its sibling) - resolved as: both split chains
+build unconditionally at cassette open/create, exactly as `Engine`'s
+constructor already builds all four track chains; and REQ-409's
+fader/mute had no persistence story (save-and-reopen would silently
+reset the buss to unity/unmuted - destructively load-bearing on the
+next bounce, per this document's own muted-bounce analysis) - resolved
+as `Manifest.bounce_fader_db`/`bounce_muted`, `#[serde(default)]`,
+carried by `apply_to`/`capture_from`, the exact `Manifest::muted`
+precedent. Three minor notes also folded in: the metering test's clean
+measurable form (buss muted, so the audible output is exactly silent
+while the meters read live); the dither test's measured region pinned
+inside the primed one (its unprimed tail would have reintroduced the
+vacuity priming eliminated); and the flush transient
+(`write_payload_chunks`' per-chunk byte buffers, ~346MB worst case,
+immaterial but named) added to REQ-904's inventory for completeness.
+Per the reviewer's own closing line: fold in A and B, and this is
+ready to implement. Awaiting owner sign-off.
