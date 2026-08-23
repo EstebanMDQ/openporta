@@ -861,6 +861,39 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       a different (already-proven-correct-by-construction) boolean
       expression, not separately screenshotted. Full gate green across
       all four feature combinations.
+      Export Video, 2026-08-23, requested directly ("make it create a
+      video... ready to upload to youtube and other services"), scoped
+      down to file generation only after two rounds of confirming with
+      the requester that actual uploading (even via a script like
+      youtubeuploader) stays out - spec.md section 2 rules out "Cloud
+      anything" for v1: a still image plus the mix, muxed into an MP4
+      via ffmpeg (`render::write_video`) - the standard "static image +
+      audio" recipe most platforms, YouTube included, accept directly.
+      Not a bundled encoder: shells out to `ffmpeg`, same reasoning MP3
+      export already applies to shine_rs, with a clear error if it's
+      missing rather than a silent failure. Reachable three ways
+      sharing the one function: an "Export Video" field+button in the
+      Tapes view (next to Export WAV/MP3, image path typed alongside
+      the existing export path), `porta-app render/export --out
+      *.mp4 --image <file>` on the CLI, and an `export_video` op in
+      session scripts. ffmpeg installed on both the Mac (brew) and the
+      Pi (apt) for this. 3 new Rust-side tests, one of them a real
+      ffmpeg round trip (generates a fixture PNG via ffmpeg itself,
+      then asserts the output starts with an MP4 ftyp box) - skips
+      cleanly if ffmpeg isn't on PATH rather than failing the suite.
+      Verified for real on the Pi: redeployed the binary, confirmed
+      `porta-app render --out out.mp4 --image cover.png` produces a
+      real MP4 (`file` reports "ISO Media, MP4 Base Media v1") using
+      the Pi's own older ffmpeg 5.1.9 build, not just the Mac's;
+      relaunched the kiosk UI on the new binary and screenshotted the
+      mixer screen to confirm no regression. Did not click through to
+      the Tapes view itself to exercise the new field/button - same
+      no-input-injection-tool limitation noted for the Tapes view and
+      Bounce button above; its logic is the same `with_engine`
+      disconnect/run/reconnect shape as Export WAV/MP3, already proven
+      live on this Pi, and the CLI path exercises the actual
+      `render::write_video` function end to end on the real hardware.
+      Full gate green across all four feature combinations.
       Tapes view + autosave + free-space indicator + no-scroll mixer
       screen, 2026-08-22, all four requested together
       ("saving progress... a view to manage tapes... free space...
