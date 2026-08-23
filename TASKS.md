@@ -1377,7 +1377,7 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       independent. The metering test mutes the BUS instead, so the
       audible output is exactly zero while both tracks read well above
       the floor. Full gate green.
-- [ ] M7.14 porta-engine: allocator-counting harness - a test-only
+- [x] M7.14 porta-engine: allocator-counting harness - a test-only
       counting global allocator asserting zero alloc/dealloc on the
       simulated realtime path across record(), process_block(), and
       stop(), for both an ordinary track pass and an open bounce pass.
@@ -1385,6 +1385,33 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       the bus but must cover it. (verify: counts are zero across
       those calls in both scenarios, and the harness fails when an
       allocation is deliberately injected)
+      Done 2026-08-23, and it paid for itself immediately: it FOUND
+      REAL ALLOCATIONS the structural reasoning had missed. record()
+      allocated 3 times per take (RecordPass's VecDeque tail plus two
+      reserve_exact calls in with_spares) and stop() once more, all on
+      the audio thread. Fixed by making RecordPass reusable in place
+      exactly as BouncePass already was: Engine owns NUM_TRACKS of them
+      built at open/create, record() calls begin() instead of
+      constructing. Two further rounds of the same class followed, each
+      caught by the harness rather than by reasoning: mem::take on the
+      chunk list handed away its capacity so the NEXT pass reallocated
+      (fixed with a container pool in the journal, plus draining rather
+      than taking), and the same bug one level down in the spare pool
+      (fixed by draining both directions - Vec::append, which keeps the
+      source's capacity). Also pre-reserved the journal's own deferred-
+      work Vecs, which are pushed from the realtime thread.
+      Result: 0 allocations AND 0 deallocations across record ->
+      process_block -> stop, for both an ordinary track pass and a
+      bounce pass. REQ-902 is now measured, not inferred.
+      Two harness notes worth keeping: the file carries the workspace's
+      only `#![allow(unsafe_code)]`, scoped to itself and justified in
+      its own module doc (GlobalAlloc cannot be safe; this never
+      compiles into a release binary). And the first version of the
+      harness was itself wrong - four tests sharing a process-wide
+      counting allocator ran in PARALLEL and each counted the others'
+      allocations, producing numbers that looked exactly like real
+      bugs. Every test now holds a file-wide mutex for its whole body,
+      setup included. Full gate green.
 - [ ] M7.15 porta-app UI: Bounce button becomes bus-arm + Record
       through the live command queue (no blocking call), with REQ-405's
       engine-side auto-clear reflected in the UI - either echo arm

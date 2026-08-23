@@ -163,6 +163,61 @@ impl RecordPass {
         std::mem::take(&mut self.spares)
     }
 
+    /// Give unused spares back by draining rather than moving, so both
+    /// this pass's container and the destination keep their capacity -
+    /// `mem::take` hands the container away and leaves a zero-capacity
+    /// one behind, which makes the NEXT give-back allocate. Same
+    /// reasoning as `drain_chunks_into`.
+    pub fn drain_spares_into(&mut self, dst: &mut Vec<Vec<i16>>) {
+        dst.append(&mut self.spares);
+    }
+
+    /// Take a reserve by draining the journal's pool, for the same
+    /// reason.
+    pub fn fill_spares_from(&mut self, src: &mut Vec<Vec<i16>>) {
+        self.spares.append(src);
+    }
+
+    /// A pass that owns its working buffers up front, for `Engine` to
+    /// hold and reuse across takes. `new`/`with_spares` allocate a
+    /// little (a `VecDeque` for the crossfade tail, capacity for the
+    /// chunk list and the per-block scratch) - fine off the realtime
+    /// thread, but `Engine::record()` runs ON it, so the engine builds
+    /// these once at cassette open/create and calls `begin` per take
+    /// instead. Found by the allocator-counting harness (M7.14), which
+    /// is exactly the kind of thing structural reasoning had missed.
+    pub fn reusable(max_block: usize, spare_capacity: usize) -> Self {
+        let mut p = Self::new(0, 0, 1);
+        p.chunks.reserve_exact(spare_capacity + 1);
+        p.spares.reserve_exact(spare_capacity + 1);
+        p.scratch.reserve_exact(max_block.max(XFADE_SAMPLES));
+        p
+    }
+
+    /// Re-open a reused pass for a new take. Every field is reset or
+    /// moved into place; nothing here allocates.
+    pub fn begin(&mut self, track: usize, start: usize, seed: u32) {
+        self.track = track;
+        self.start = start;
+        self.total_len = 0;
+        self.chunks.clear();
+        self.current.clear();
+        self.allocated_on_thread = false;
+        self.tail.clear();
+        self.dither = Dither::new(seed);
+    }
+
+    /// Move this pass's captured chunks into `dst` without consuming
+    /// the pass and without giving up `self.chunks`' own reserved
+    /// capacity - `mem::take` would hand the container away and leave
+    /// an empty one behind, so the NEXT take would reallocate on the
+    /// realtime thread. `dst` comes from the journal's container pool
+    /// and already has room; draining into it moves pointers only.
+    pub fn drain_chunks_into(&mut self, dst: &mut Vec<Vec<i16>>) {
+        self.chunks.push(std::mem::take(&mut self.current));
+        dst.append(&mut self.chunks);
+    }
+
     /// Samples written so far.
     pub fn len(&self) -> usize {
         self.total_len

@@ -171,6 +171,9 @@ pub struct Journal {
     /// `reclaim_chunks` dropped overflow chunks immediately, a real
     /// REQ-902 gap this closes).
     pending_frees: Vec<Vec<i16>>,
+    /// Containers past the pool's cap, dropped off-thread by
+    /// `flush_pending` for the same reason `pending_frees` exists.
+    spent_containers: Vec<Vec<Vec<i16>>>,
     /// One pre-reserved reserve of chunk buffers per track (see
     /// `CHUNK_POOL_PER_TRACK`) - `take_spares` hands a track's whole
     /// reserve over in one move (genuinely zero-allocation: it takes
@@ -195,6 +198,13 @@ pub struct Journal {
     /// falls back to allocating, counted and documented rather than
     /// silently wrong.
     bus_reserve: Vec<(Vec<i16>, Vec<i16>)>,
+    /// Empty chunk-list containers, recycled. A payload's chunks travel
+    /// in one of these from a closed pass to `flush_pending`; without a
+    /// pool the container would be allocated per pass and dropped per
+    /// flush, both reachable from the realtime thread. Only the
+    /// container is pooled here - the chunk buffers inside it go back
+    /// to `chunk_pool`.
+    container_pool: Vec<Vec<Vec<i16>>>,
 }
 
 impl Journal {
@@ -203,14 +213,19 @@ impl Journal {
         fs::create_dir_all(&dir)?;
         Ok(Self {
             dir,
-            undo: Vec::new(),
-            redo: Vec::new(),
+            undo: Vec::with_capacity(DEFAULT_MAX_PASSES + 1),
+            redo: Vec::with_capacity(DEFAULT_MAX_PASSES + 1),
             next_id: 0,
             max_passes: DEFAULT_MAX_PASSES,
             max_bytes: DEFAULT_MAX_BYTES,
-            pending_writes: Vec::new(),
-            pending_deletes: Vec::new(),
-            pending_frees: Vec::new(),
+            // Pre-reserved: these are pushed from the realtime thread
+            // (push_pass/evict), so their first growth would otherwise
+            // be an allocation there. Sized for the journal's own pass
+            // cap, which bounds how many can be outstanding at once.
+            pending_writes: Vec::with_capacity(DEFAULT_MAX_PASSES + 1),
+            pending_deletes: Vec::with_capacity(DEFAULT_MAX_PASSES + 1),
+            pending_frees: Vec::with_capacity(CHUNK_POOL_PER_TRACK),
+            spent_containers: Vec::with_capacity(DEFAULT_MAX_PASSES + 1),
             chunk_pool: std::array::from_fn(|_| {
                 (0..CHUNK_POOL_PER_TRACK)
                     .map(|_| Vec::with_capacity(CHUNK_SAMPLES))
@@ -219,6 +234,9 @@ impl Journal {
             // Empty until `with_bus_reserve` sizes it: only the caller
             // knows the cassette's tape length.
             bus_reserve: Vec::with_capacity(BUS_RESERVE_PAIRS),
+            container_pool: (0..DEFAULT_MAX_PASSES + 1)
+                .map(|_| Vec::with_capacity(CHUNK_POOL_PER_TRACK + 1))
+                .collect(),
         })
     }
 
@@ -272,6 +290,13 @@ impl Journal {
     /// re-arming and recording again before the previous pass on this
     /// track has closed - can't happen through `Engine::record()`
     /// today, but `take_spares` itself doesn't assume it).
+    /// The pool for `track`, for a pass to drain (see
+    /// `RecordPass::fill_spares_from`) - draining leaves this
+    /// container's capacity intact, which `take_spares` does not.
+    pub fn spares_mut(&mut self, track: usize) -> &mut Vec<Vec<i16>> {
+        &mut self.chunk_pool[track]
+    }
+
     pub fn take_spares(&mut self, track: usize) -> Vec<Vec<i16>> {
         std::mem::take(&mut self.chunk_pool[track])
     }
@@ -362,7 +387,7 @@ impl Journal {
     /// any new take invalidates the branch that was undone; those
     /// payloads are dropped from `pending_writes` if never flushed, or
     /// queued for deletion if they already made it to disk.
-    pub fn push_pass(&mut self, mut pass: RecordPass) {
+    pub fn push_pass(&mut self, pass: &mut RecordPass) {
         // Indexed, not `drain`, so `release_entry_payload` (which needs
         // its own `&mut self`) isn't fighting an active borrow of
         // `self.redo` - and no allocation for a temporary id/track list.
@@ -373,7 +398,7 @@ impl Journal {
         // and only one pass per track can be open at a time) - `extend`
         // rather than a plain assignment so a same-track redo
         // invalidation just above doesn't get overwritten.
-        self.chunk_pool[track].extend(pass.take_unused_spares());
+        pass.drain_spares_into(&mut self.chunk_pool[track]);
         if pass.is_empty() {
             return;
         }
@@ -383,11 +408,10 @@ impl Journal {
         let len = pass.len();
         // `into_chunks` just moves already-allocated chunk buffers into
         // `pending_writes` - no allocation of the sample data itself.
-        self.pending_writes.push(Pending::Track {
-            id,
-            track,
-            chunks: pass.into_chunks(),
-        });
+        let mut chunks = self.container_pool.pop().unwrap_or_default();
+        pass.drain_chunks_into(&mut chunks);
+        self.pending_writes
+            .push(Pending::Track { id, track, chunks });
         self.undo.push(Entry::for_track(id, track, start, len));
         self.evict();
     }
@@ -484,8 +508,8 @@ impl Journal {
     /// Whatever doesn't fit back (see `pending_frees`'s doc comment)
     /// is parked there instead of dropped in place - this function must
     /// stay realtime-safe itself, since one of its callers is.
-    fn reclaim_chunks(&mut self, track: usize, chunks: Vec<Vec<i16>>) {
-        for mut chunk in chunks {
+    fn reclaim_chunks(&mut self, track: usize, mut chunks: Vec<Vec<i16>>) {
+        for mut chunk in chunks.drain(..) {
             chunk.clear();
             if chunk.capacity() >= CHUNK_SAMPLES
                 && self.chunk_pool[track].len() < CHUNK_POOL_PER_TRACK
@@ -494,6 +518,13 @@ impl Journal {
             } else {
                 self.pending_frees.push(chunk);
             }
+        }
+        // The (now empty) container goes back too, so neither it nor
+        // its capacity is ever dropped on the realtime thread.
+        if self.container_pool.len() < DEFAULT_MAX_PASSES + 1 {
+            self.container_pool.push(chunks);
+        } else {
+            self.spent_containers.push(chunks);
         }
     }
 
@@ -537,6 +568,7 @@ impl Journal {
         // this call or an earlier realtime-thread one, actually drops
         // here - the one place that's always off the realtime thread.
         self.pending_frees.clear();
+        self.spent_containers.clear();
         Ok(())
     }
 
@@ -679,12 +711,12 @@ mod tests {
         let mut tape = Tape::new(48_000);
         let mut j = Journal::new(&dir.0).unwrap();
 
-        let p0 = record(&mut tape, 0, 0, 220.0, 30_000);
-        j.push_pass(p0);
+        let mut p0 = record(&mut tape, 0, 0, 220.0, 30_000);
+        j.push_pass(&mut p0);
         let after_first = snapshot(&tape, 0, 48_000);
 
-        let p1 = record(&mut tape, 0, 5000, 1100.0, 10_000);
-        j.push_pass(p1);
+        let mut p1 = record(&mut tape, 0, 5000, 1100.0, 10_000);
+        j.push_pass(&mut p1);
         let after_second = snapshot(&tape, 0, 48_000);
         assert_ne!(after_first, after_second);
 
@@ -711,13 +743,13 @@ mod tests {
         let mut tape = Tape::new(48_000);
         let mut j = Journal::new(&dir.0).unwrap();
 
-        let p0 = record(&mut tape, 1, 0, 220.0, 10_000);
-        j.push_pass(p0);
+        let mut p0 = record(&mut tape, 1, 0, 220.0, 10_000);
+        j.push_pass(&mut p0);
         j.undo(&mut tape).unwrap();
         assert!(j.can_redo());
 
-        let p1 = record(&mut tape, 1, 0, 660.0, 10_000);
-        j.push_pass(p1);
+        let mut p1 = record(&mut tape, 1, 0, 660.0, 10_000);
+        j.push_pass(&mut p1);
         assert!(!j.can_redo(), "new take must invalidate the redo branch");
     }
 
@@ -744,7 +776,7 @@ mod tests {
         // (via eviction, below) and unused ones (via push_pass itself).
         p0.write_block(&mut tape, &sine(220.0, -6.0, 100));
         p0.finish(&mut tape);
-        j.push_pass(p0); // pending: id 0, never flushed
+        j.push_pass(&mut p0); // pending: id 0, never flushed
 
         // A second, non-empty pass on the same track: push_pass reaches
         // evict() (an empty pass would return early first), and the
@@ -752,7 +784,7 @@ mod tests {
         let mut p1 = RecordPass::new(0, 200, 2);
         p1.write_block(&mut tape, &sine(440.0, -6.0, 100));
         p1.finish(&mut tape);
-        j.push_pass(p1);
+        j.push_pass(&mut p1);
 
         assert_eq!(j.depth(), 1, "cap enforced");
         let recovered = j.take_spares(0);
@@ -952,16 +984,16 @@ mod tests {
         let mut tape = Tape::new(48_000);
         let mut j = Journal::new(&dir.0).unwrap().with_caps(3, u64::MAX);
         for i in 0..6 {
-            let p = record(&mut tape, 2, i * 1000, 300.0 + i as f32 * 50.0, 2000);
-            j.push_pass(p);
+            let mut p = record(&mut tape, 2, i * 1000, 300.0 + i as f32 * 50.0, 2000);
+            j.push_pass(&mut p);
         }
         assert_eq!(j.depth(), 3, "oldest passes evicted");
 
         // Byte cap binds before the pass cap.
         let mut j2 = Journal::new(&dir.0).unwrap().with_caps(100, 8000);
         for i in 0..5 {
-            let p = record(&mut tape, 3, i * 1000, 400.0, 2000);
-            j2.push_pass(p);
+            let mut p = record(&mut tape, 3, i * 1000, 400.0, 2000);
+            j2.push_pass(&mut p);
         }
         assert!(
             j2.depth() <= 2,
@@ -974,8 +1006,8 @@ mod tests {
     fn empty_pass_is_not_journaled() {
         let dir = TempDir::new("empty");
         let mut j = Journal::new(&dir.0).unwrap();
-        let p = RecordPass::new(0, 0, 1);
-        j.push_pass(p);
+        let mut p = RecordPass::new(0, 0, 1);
+        j.push_pass(&mut p);
         assert_eq!(j.depth(), 0);
     }
 
@@ -986,11 +1018,11 @@ mod tests {
         let baseline;
         {
             let mut j = Journal::new(&dir.0).unwrap();
-            let p0 = record(&mut tape, 0, 0, 220.0, 20_000);
-            j.push_pass(p0);
+            let mut p0 = record(&mut tape, 0, 0, 220.0, 20_000);
+            j.push_pass(&mut p0);
             baseline = snapshot(&tape, 0, 48_000);
-            let p1 = record(&mut tape, 0, 4000, 990.0, 6000);
-            j.push_pass(p1);
+            let mut p1 = record(&mut tape, 0, 4000, 990.0, 6000);
+            j.push_pass(&mut p1);
             j.save().unwrap();
         }
         let mut reloaded = Journal::load(&dir.0).unwrap();

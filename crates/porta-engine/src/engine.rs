@@ -12,7 +12,7 @@ use crate::project::{Manifest, Project, ProjectError};
 use crate::record::{BouncePass, RecordPass};
 use crate::tape::{BusChannel, Tape};
 use crate::transport::{Transport, TransportState};
-use crate::undo::{Journal, UndoError};
+use crate::undo::{Journal, UndoError, CHUNK_POOL_PER_TRACK};
 use crate::NUM_TRACKS;
 use porta_dsp::character::TapeCharacter;
 use porta_dsp::flutter::StereoFlutter;
@@ -43,7 +43,10 @@ pub struct Engine {
     /// playing, not just while actually recording - see
     /// `Command::Monitor`.
     monitor: [bool; NUM_TRACKS],
-    passes: [Option<RecordPass>; NUM_TRACKS],
+    /// Reused across takes rather than constructed per take: building
+    /// one allocates, and `record()` runs on the realtime thread.
+    passes: Vec<RecordPass>,
+    pass_open: [bool; NUM_TRACKS],
     chains: Vec<Chain>,
     pass_counter: u64,
     pass_buffer_fallbacks: u64,
@@ -124,7 +127,10 @@ impl Engine {
             armed: [false; NUM_TRACKS],
             bus_armed: false,
             monitor: [false; NUM_TRACKS],
-            passes: [const { None }; NUM_TRACKS],
+            passes: (0..NUM_TRACKS)
+                .map(|_| RecordPass::reusable(MAX_BLOCK, CHUNK_POOL_PER_TRACK))
+                .collect(),
+            pass_open: [false; NUM_TRACKS],
             // Built for real here, off the realtime thread, so `record()`
             // (which runs on it) only ever has to reseed an existing
             // chain in place, not allocate a new one (REQ-902 - see
@@ -262,15 +268,17 @@ impl Engine {
         }
         let start = self.transport.playhead();
         for t in 0..NUM_TRACKS {
-            if self.armed[t] && self.passes[t].is_none() {
+            if self.armed[t] && !self.pass_open[t] {
                 let seed = seed_for(self.project.manifest.noise_seed, self.pass_counter);
                 self.pass_counter += 1;
                 // This track's whole chunk-buffer reserve, not a
                 // reserve_exact sized to the whole remaining tape - this
                 // runs on the realtime audio thread (REQ-902; see
                 // record.rs's module doc comment).
-                let spares = self.journal.take_spares(t);
-                self.passes[t] = Some(RecordPass::with_spares(t, start, seed, MAX_BLOCK, spares));
+                let (pass, journal) = (&mut self.passes[t], &mut self.journal);
+                pass.begin(t, start, seed);
+                pass.fill_spares_from(journal.spares_mut(t));
+                self.pass_open[t] = true;
                 // Reseed the track's existing chain in place rather than
                 // building a fresh one (that used to be a realtime-thread
                 // allocation - see reseed_chain's doc comment; found in
@@ -354,12 +362,14 @@ impl Engine {
             }
         }
         for t in 0..NUM_TRACKS {
-            if let Some(mut pass) = self.passes[t].take() {
-                pass.finish(&mut self.tape);
+            if self.pass_open[t] {
+                self.pass_open[t] = false;
+                let (pass, tape) = (&mut self.passes[t], &mut self.tape);
+                pass.finish(tape);
                 if pass.allocated_on_thread {
                     self.pass_buffer_fallbacks += 1;
                 }
-                self.journal.push_pass(pass);
+                self.journal.push_pass(&mut self.passes[t]);
             }
         }
     }
@@ -406,8 +416,9 @@ impl Engine {
                 self.processed[t][..src.len()].copy_from_slice(src);
                 self.processed[t][src.len()..n].fill(0.0);
                 self.chains[t].process(&mut self.processed[t][..n]);
-                if let Some(pass) = self.passes[t].as_mut() {
-                    pass.write_block(&mut self.tape, &self.processed[t][..n]);
+                if self.pass_open[t] {
+                    let (pass, tape) = (&mut self.passes[t], &mut self.tape);
+                    pass.write_block(tape, &self.processed[t][..n]);
                 }
                 // Monitoring is post-chain (REQ-305): the player hears
                 // what the tape is receiving, not the old tape content.
