@@ -70,6 +70,29 @@ pub fn mixdown(engine: &mut Engine, samples: usize) -> (Vec<f32>, Vec<f32>) {
     (out_l, out_r)
 }
 
+/// Drop the unrecorded tail of a mixdown.
+///
+/// A cassette is a fixed length, so a 90-second take on a 15-minute
+/// tape renders 13.5 minutes of nothing after it - which is what an
+/// export used to write. Trailing zeros are an exact marker for "never
+/// recorded here", not a heuristic: every recorded region carries the
+/// character chain's own hiss, so it is never digitally silent, while
+/// untouched tape is exactly zero and stays exactly zero through the
+/// mixer's gain and clamp. Anything the user actually put on tape
+/// survives this; only the unused remainder goes.
+///
+/// Returns the number of frames kept.
+pub fn trim_unrecorded_tail(l: &mut Vec<f32>, r: &mut Vec<f32>) -> usize {
+    let n = l.len().min(r.len());
+    let keep = (0..n)
+        .rev()
+        .find(|&i| l[i] != 0.0 || r[i] != 0.0)
+        .map_or(0, |i| i + 1);
+    l.truncate(keep);
+    r.truncate(keep);
+    keep
+}
+
 pub fn write_wav(
     path: impl AsRef<Path>,
     l: &[f32],
@@ -224,4 +247,45 @@ pub fn read_wav_mono(path: impl AsRef<Path>) -> Result<Vec<f32>, hound::Error> {
         .chunks(channels)
         .map(|f| f.iter().sum::<f32>() / channels as f32)
         .collect())
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::trim_unrecorded_tail;
+
+    #[test]
+    fn drops_the_silent_tail_and_keeps_everything_recorded() {
+        let mut l = vec![0.0, 0.5, -0.25, 0.0, 0.0, 0.0];
+        let mut r = vec![0.0, 0.5, -0.25, 0.0, 0.0, 0.0];
+        assert_eq!(trim_unrecorded_tail(&mut l, &mut r), 3);
+        assert_eq!(l, vec![0.0, 0.5, -0.25]);
+        assert_eq!(r, vec![0.0, 0.5, -0.25]);
+    }
+
+    #[test]
+    fn keeps_interior_silence() {
+        // A gap in the middle of a take is material, not an unused tail.
+        let mut l = vec![0.5, 0.0, 0.0, 0.0, 0.3, 0.0];
+        let mut r = vec![0.5, 0.0, 0.0, 0.0, 0.3, 0.0];
+        assert_eq!(trim_unrecorded_tail(&mut l, &mut r), 5);
+        assert_eq!(l.len(), 5);
+    }
+
+    #[test]
+    fn either_channel_alone_counts_as_recorded() {
+        // A hard-panned source only reaches one side.
+        let mut l = vec![0.0, 0.0, 0.0];
+        let mut r = vec![0.0, 0.4, 0.0];
+        assert_eq!(trim_unrecorded_tail(&mut l, &mut r), 2);
+        assert_eq!(l.len(), 2);
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn an_entirely_silent_tape_trims_to_nothing() {
+        let mut l = vec![0.0; 100];
+        let mut r = vec![0.0; 100];
+        assert_eq!(trim_unrecorded_tail(&mut l, &mut r), 0);
+        assert!(l.is_empty() && r.is_empty());
+    }
 }

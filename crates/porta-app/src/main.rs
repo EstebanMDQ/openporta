@@ -30,8 +30,10 @@ usage:
   porta-app export <dir> --out <file.wav|mp3|mp4> [--seconds N] [--bits 16|24]
                          [--image <file>]
 
-render and export are the same thing: a stereo mixdown of the whole tape
-from the start, or of the first N seconds. Format follows --out's own
+render and export are the same thing: a stereo mixdown from the start of
+the tape. By default the unrecorded tail is dropped, so a 90-second take
+on a 15-minute cassette exports 90 seconds and not 15 minutes; pass
+--seconds N to write exactly N seconds instead, silence included. Format follows --out's own
 extension: .wav is the master (lossless, --bits 16 or 24), .mp3 is the
 convenience format to share (fixed 192kbps, --bits doesn't apply), .mp4
 pairs the mix with a single still image (--image, required) into a
@@ -129,7 +131,13 @@ fn cmd_render(args: &[String]) -> Result<(), String> {
         None => len,
     };
     engine.seek(0);
-    let (l, r) = render::mixdown(&mut engine, samples);
+    let (mut l, mut r) = render::mixdown(&mut engine, samples);
+    // Without an explicit --seconds, drop the unrecorded tail: a fixed
+    // length cassette otherwise renders minutes of digital silence
+    // after a short take.
+    if flag(args, "--seconds").is_none() {
+        render::trim_unrecorded_tail(&mut l, &mut r);
+    }
     let seconds = l.len() as f32 / porta_engine::SAMPLE_RATE as f32;
     if ext == "mp3" {
         render::write_mp3(out, &l, &r).map_err(|e| e.to_string())?;

@@ -1332,12 +1332,29 @@ fn default_export_path(cassette_dir: &str) -> String {
 }
 
 /// Export the whole tape from the top as a 16-bit WAV.
-fn export_wav(engine: &mut Engine, path: &str) -> String {
+/// Render the whole tape and drop the unrecorded tail (see
+/// `render::trim_unrecorded_tail`) - a fixed-length cassette otherwise
+/// exports minutes of digital silence after a short take.
+fn render_for_export(engine: &mut Engine) -> (Vec<f32>, Vec<f32>, f32) {
     engine.seek(0);
     let len = engine.manifest().len_samples;
-    let (l, r) = crate::render::mixdown(engine, len);
+    let (mut l, mut r) = crate::render::mixdown(engine, len);
+    let kept = crate::render::trim_unrecorded_tail(&mut l, &mut r);
+    (l, r, kept as f32 / porta_engine::SAMPLE_RATE as f32)
+}
+
+/// Shared by all three export formats: nothing on tape means nothing
+/// to write. Silently producing a zero-length file reads as a broken
+/// export rather than an empty cassette.
+const NOTHING_RECORDED: &str = "nothing recorded yet - nothing to export";
+
+fn export_wav(engine: &mut Engine, path: &str) -> String {
+    let (l, r, secs) = render_for_export(engine);
+    if l.is_empty() {
+        return NOTHING_RECORDED.to_string();
+    }
     match crate::render::write_wav(path, &l, &r, crate::render::BitDepth::Sixteen) {
-        Ok(()) => format!("exported to {path}"),
+        Ok(()) => format!("exported {secs:.1}s to {path}"),
         Err(e) => format!("export failed: {e}"),
     }
 }
@@ -1355,11 +1372,12 @@ fn mp3_export_path(wav_export_path: &str) -> String {
 /// Export the whole tape from the top as an MP3 (the share format,
 /// fixed bitrate - see render::write_mp3; WAV is the master).
 fn export_mp3(engine: &mut Engine, path: &str) -> String {
-    engine.seek(0);
-    let len = engine.manifest().len_samples;
-    let (l, r) = crate::render::mixdown(engine, len);
+    let (l, r, secs) = render_for_export(engine);
+    if l.is_empty() {
+        return NOTHING_RECORDED.to_string();
+    }
     match crate::render::write_mp3(path, &l, &r) {
-        Ok(()) => format!("exported to {path}"),
+        Ok(()) => format!("exported {secs:.1}s to {path}"),
         Err(e) => format!("export failed: {e}"),
     }
 }
@@ -1382,11 +1400,12 @@ fn export_video(engine: &mut Engine, image: &str, path: &str) -> String {
     if image.trim().is_empty() {
         return "video export needs an image path".to_string();
     }
-    engine.seek(0);
-    let len = engine.manifest().len_samples;
-    let (l, r) = crate::render::mixdown(engine, len);
+    let (l, r, secs) = render_for_export(engine);
+    if l.is_empty() {
+        return NOTHING_RECORDED.to_string();
+    }
     match crate::render::write_video(path, image, &l, &r) {
-        Ok(()) => format!("exported to {path}"),
+        Ok(()) => format!("exported {secs:.1}s to {path}"),
         Err(e) => format!("export failed: {e}"),
     }
 }
@@ -1530,28 +1549,62 @@ mod tests {
         assert!(text.ends_with("GB free"), "got: {text}");
     }
 
+    /// Put real material on track 1 so an export has something to
+    /// write - a blank cassette now exports nothing by design.
+    fn record_something(engine: &mut Engine, samples: usize) {
+        use porta_testkit::signal::{silence, sine};
+        engine.set_armed(0, true);
+        engine.seek(0);
+        engine.record();
+        let tone = sine(440.0, -6.0, samples);
+        let quiet = silence(samples);
+        let mut l = vec![0.0; samples];
+        let mut r = vec![0.0; samples];
+        let inputs: [&[f32]; NUM_TRACKS] = [&tone, &quiet, &quiet, &quiet];
+        engine.process_block(&inputs, &mut l, &mut r);
+        engine.stop();
+        engine.set_armed(0, false);
+    }
+
     #[test]
     fn export_wav_writes_a_real_wav_file() {
         let dir = TempDir::new("export");
-        let mut engine = Engine::create(&dir.0, 4_800, 1).unwrap();
+        let mut engine = Engine::create(&dir.0, 9_600, 1).unwrap();
+        record_something(&mut engine, 4_800);
         let out = dir.0.join("out.wav");
         let status = export_wav(&mut engine, out.to_str().unwrap());
-        assert!(status.starts_with("exported to"), "got: {status}");
+        assert!(status.starts_with("exported "), "got: {status}");
         assert!(out.exists(), "export_wav should have written a file");
 
         let reader = hound::WavReader::open(&out).unwrap();
         assert_eq!(reader.spec().channels, 2);
         assert_eq!(reader.spec().sample_rate, porta_engine::SAMPLE_RATE);
-        assert_eq!(reader.duration(), 4_800);
+        // Trimmed to what was recorded, not the whole 9600-sample tape.
+        assert!(
+            reader.duration() > 0 && reader.duration() <= 4_800,
+            "expected the export trimmed to the take, got {} frames",
+            reader.duration()
+        );
+    }
+
+    #[test]
+    fn exporting_a_blank_cassette_reports_instead_of_writing_an_empty_file() {
+        let dir = TempDir::new("export-blank");
+        let mut engine = Engine::create(&dir.0, 4_800, 1).unwrap();
+        let out = dir.0.join("out.wav");
+        let status = export_wav(&mut engine, out.to_str().unwrap());
+        assert!(status.contains("nothing"), "got: {status}");
+        assert!(!out.exists(), "a blank cassette must not write a file");
     }
 
     #[test]
     fn export_mp3_writes_a_real_mp3_file() {
         let dir = TempDir::new("export-mp3");
-        let mut engine = Engine::create(&dir.0, 4_800, 1).unwrap();
+        let mut engine = Engine::create(&dir.0, 9_600, 1).unwrap();
+        record_something(&mut engine, 4_800);
         let out = dir.0.join("out.mp3");
         let status = export_mp3(&mut engine, out.to_str().unwrap());
-        assert!(status.starts_with("exported to"), "got: {status}");
+        assert!(status.starts_with("exported "), "got: {status}");
         // A real MPEG frame sync (11 set bits) at the start, not just a
         // file with the right name - encoding actually happened.
         let bytes = std::fs::read(&out).unwrap();
@@ -1583,7 +1636,8 @@ mod tests {
             return;
         }
         let dir = TempDir::new("export-video");
-        let mut engine = Engine::create(&dir.0, 4_800, 1).unwrap();
+        let mut engine = Engine::create(&dir.0, 9_600, 1).unwrap();
+        record_something(&mut engine, 4_800);
         // Generate the test fixture image with ffmpeg itself, rather
         // than hand-rolling image bytes - if this fails, so would the
         // real feature, for the same underlying reason.
@@ -1608,7 +1662,7 @@ mod tests {
 
         let out = dir.0.join("out.mp4");
         let result = export_video(&mut engine, image.to_str().unwrap(), out.to_str().unwrap());
-        assert!(result.starts_with("exported to"), "got: {result}");
+        assert!(result.starts_with("exported "), "got: {result}");
         assert!(out.exists(), "export_video should have written a file");
         // A real MP4 container structure, not just a file with the
         // right name - the ftyp box is the very first thing in any
