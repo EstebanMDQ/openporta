@@ -1,4 +1,4 @@
-<!--
+{% comment %}
   Overrides jekyll-theme-cayman's own default layout, copied from
   pages-themes/cayman and changed in exactly one respect: every string
   the theme injects around the page body is localised off `page.lang`,
@@ -11,7 +11,7 @@
 
   `es` is the only alternate language today; anything else falls back to
   English, so adding a page without a `lang:` cannot break the build.
--->
+{% endcomment %}
 {% assign es = false %}
 {% if page.lang == "es" %}{% assign es = true %}{% endif %}
 <!DOCTYPE html>
