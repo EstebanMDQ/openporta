@@ -1,5 +1,14 @@
 # 001: A dedicated stereo bounce bus, printed in real time
 
+> **Status: ACCEPTED and IMPLEMENTED.** Approved at review round 12
+> (v12, "APPROVE WITH NOTES"; notes folded into v13), signed off by the
+> owner, and folded into `openspec/spec.md` v1.1 - REQ-401/402
+> rewritten, REQ-404 through REQ-409 added, REQ-603 deleted,
+> REQ-502/602/702/801/904 amended. Implemented as milestone M7
+> (M7.1-M7.15, all complete; see `TASKS.md`) and shipped in v0.1.0.
+> This document is kept as the design record and the history of how it
+> got there; `spec.md` is now the authority on what the bus does.
+
 ## Motivation
 
 Requested directly by the owner while using the app, then reshaped

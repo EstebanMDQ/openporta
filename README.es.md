@@ -74,7 +74,7 @@ Raspberry Pi 4.
 | M3 mezcla, mixdown, exportación WAV, CLI | hecho |
 | M4 audio en tiempo real (cpal) | verificado en macOS y en hardware Pi |
 | M5 interfaz Slint: transporte, tiras de pista, medidores, barra de posición, guardar/deshacer, vista de Cintas, exportación, audio real | hecho |
-| M7 bus de mezcla estéreo (cambio 001) | en curso: motor completo, falta la interfaz |
+| M7 bus de mezcla estéreo (cambio 001) | hecho, publicado en v0.1.0 |
 | M6 despliegue en Raspberry Pi | en curso: compilación aarch64, capa de dispositivos ALSA/PipeWire, grabación/guardado full-duplex, reconexión automática al dispositivo recordado, autoarranque en kiosco con íconos, y autoguardado al detener, todo verificado en hardware real; falta el perfilado de rendimiento (M6.2) |
 
 Se encontraron y corrigieron acá tres errores distintos de seguridad en
@@ -90,12 +90,17 @@ La propuesta de un bus de mezcla estéreo dedicado
 (`openspec/changes/001-stereo-repeatable-bounce.md`) fue **aprobada
 tras doce rondas de revisión a lo largo de trece revisiones**, y todas
 las rondas menos la última encontraron un error o un hueco real. Ya
-está incorporada a `openspec/spec.md` (v1.1) y el lado del motor está
-implementado: impresión estéreo en tiempo real, deshacer atómico de dos
+está incorporada a `openspec/spec.md` (v1.1) y completamente
+implementada: impresión estéreo en tiempo real, deshacer atómico de dos
 canales, mezclas que se pliegan hacia adelante en vez de reemplazarse,
-y el fader master demostrablemente sin llegar nunca a la cinta. Lo que
-queda es la superficie de interfaz para el fader y el silencio del
-propio bus.
+el fader master demostrablemente sin llegar nunca a la cinta, y una
+tira de Bus en la interfaz con su propio fader y silencio.
+
+REQ-902 se mide en vez de argumentarse: un asignador global contador,
+solo para pruebas, verifica **cero reservas y cero liberaciones** en
+`record -> process_block -> stop`, tanto para una pasada de pista como
+para una mezcla. La primera vez que corrió encontró cuatro violaciones
+más que el razonamiento cuidadoso había pasado por alto.
 
 Hoy lo manejás con guiones de sesión, la CLI o la interfaz. `TASKS.md`
 es la cola de trabajo.

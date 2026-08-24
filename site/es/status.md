@@ -20,7 +20,7 @@ lang: es
 | Audio en tiempo real (cpal) | verificado en macOS y en hardware Raspberry Pi |
 | Interfaz Slint: transporte, tiras de pista (armar/silenciar/monitor/fader/paneo), medidores, barra de posición de cinta, guardar/deshacer, gestión de casetes, exportación, audio real | hecho |
 | Despliegue en Raspberry Pi | en curso, ver abajo |
-| Bus de mezcla estéreo (cambio 001) | en curso: motor completo, falta la interfaz |
+| Bus de mezcla estéreo (cambio 001) | hecho, publicado en v0.1.0 |
 
 El hito de Raspberry Pi ya cubre bastante terreno: compilación
 aarch64, la capa de dispositivos ALSA/PipeWire, grabación y guardado
@@ -51,6 +51,15 @@ El segundo y el tercero los encontraron revisiones adversariales de una
 propuesta que no tenía nada que ver con ellos. Cada uno se corrigió con
 una prueba de regresión que falla contra el comportamiento viejo.
 
+La regla tampoco se argumenta ya de forma estructural. Un asignador
+global contador, solo para pruebas, mide ahora el camino de tiempo real
+directamente, y la primera vez que corrió encontró cuatro reservas más
+que el razonamiento cuidadoso había pasado por alto: un objeto de
+pasada reconstruido en cada toma, y tres lugares distintos donde ceder
+un contenedor perdía la capacidad que la toma siguiente necesitaba. El
+camino está medido hoy en cero reservas y cero liberaciones, tanto para
+una pasada de grabación común como para una mezcla.
+
 ## Cambiar una decisión establecida
 
 Este proyecto trata su especificación como una constitución: la
@@ -79,12 +88,13 @@ que funcionaba, y - dos veces - una prueba especificada en la propuesta
 que nunca podría haber pasado tal como estaba escrita. A ninguna se le
 dio el visto bueno de trámite.
 
-El lado del motor ya está implementado y en verde: una pasada estéreo
-en tiempo real, deshacer atómico de dos canales, el bus plegando su
-propio contenido anterior hacia adelante para que las mezclas se
-apilen en vez de reemplazarse, y el fader master demostrablemente sin
-llegar nunca a la cinta. Lo que queda es la superficie de interfaz para
-el fader y el silencio del propio bus.
+Ya está completamente implementado y publicado: una pasada estéreo en
+tiempo real, deshacer atómico de dos canales, el bus plegando su propio
+contenido anterior hacia adelante para que las mezclas se apilen en vez
+de reemplazarse, el fader master demostrablemente sin llegar nunca a la
+cinta, y una tira de Bus en la interfaz con su propio fader y silencio.
+Verificado en una Raspberry Pi con una interfaz real, no solo en
+pruebas.
 
 Eso es más lento que simplemente escribir la función. También es
 exactamente el intercambio que un proyecto como este debería hacer.

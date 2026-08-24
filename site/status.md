@@ -19,7 +19,7 @@ date: 2026-08-22
 | Realtime audio (cpal) | verified on macOS and Raspberry Pi hardware |
 | Slint UI: transport, track strips (arm/mute/monitor/fader/pan), meters, tape position bar, save/undo, cassette management, export, real audio | done |
 | Raspberry Pi deployment | in progress - see below |
-| Stereo bounce bus (change 001) | in progress - engine complete, UI remaining |
+| Stereo bounce bus (change 001) | done - shipped in v0.1.0 |
 
 The Raspberry Pi milestone covers a lot of ground already: aarch64
 build, the ALSA/PipeWire device layer, full-duplex record/save,
@@ -49,6 +49,14 @@ The second and third were found by adversarial reviews of a proposal
 that had nothing to do with them. Each was fixed with a regression test
 that fails against the old behavior.
 
+The rule is no longer argued structurally, either. A test-only counting
+global allocator now measures the realtime path directly, and the first
+time it ran it found four more allocations that careful reasoning had
+missed - a pass object rebuilt per take, and three separate places
+where handing a container away lost the capacity the next take needed.
+The path is now measured at zero allocations and zero deallocations,
+for both an ordinary record pass and a bounce.
+
 ## Changing a settled decision
 
 This project treats its specification as a constitution: the number of
@@ -73,11 +81,11 @@ against the code as it actually shipped rather than as it was assumed
 to work, and - twice - a test specified in the proposal that could
 never have passed as written. None of it was rubber-stamped through.
 
-The engine side is now implemented and green: a real-time stereo pass,
+It is now fully implemented and shipped: a real-time stereo pass,
 atomic two-channel undo, the bus folding its own prior content forward
-so bounces layer instead of replacing, and the master fader provably
-never reaching tape. The remaining work is the UI surface for the bus's
-own fader and mute.
+so bounces layer instead of replacing, the master fader provably never
+reaching tape, and a Bus strip in the UI with its own fader and mute.
+Verified on a Raspberry Pi with a real interface, not just in tests.
 
 That's slower than just writing the feature. It's also exactly the
 tradeoff a project like this is supposed to make.

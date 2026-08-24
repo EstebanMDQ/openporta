@@ -1,5 +1,14 @@
 # 002: Per-track input channel selection
 
+> **Status: ACCEPTED and IMPLEMENTED.** Approved at review round 2 (v2,
+> "APPROVE WITH NOTES"; notes folded into v3) and signed off by the
+> owner. Implemented under M6.1 and shipped in v0.1.0: `--in-map`
+> replaces `--in-offset`, the UI's offset field became an "Input
+> channels" list, and offset-era `audio.json` entries migrate on load.
+> Verified on the real Pi against a Zoom L6. REQ-907/908/909 still need
+> transcribing into `openspec/spec.md` - see the note at the end of
+> this document.
+
 ## Motivation
 
 Requested directly by the owner: "we need to be able to select the
@@ -419,3 +428,11 @@ wipe; zero-assigned maps are documented as never persisted (the
 `remember()` gates make it fall out that way - now a stated choice,
 not an accident); and a valueless `--in-map` errors the same way
 `--in-offset` does. Awaiting owner sign-off.
+
+## Follow-up still open
+
+REQ-907/908/909 as drafted above have **not** yet been transcribed into
+`openspec/spec.md`. The behaviour shipped and is verified on hardware,
+but the spec is the project's authority, so until they land there the
+requirements exist only in this proposal. Worth doing before the next
+spec-affecting change, not left to drift.

@@ -68,7 +68,7 @@ Zoom L6 on both macOS and a Raspberry Pi 4.
 | M3 bounce, mixdown, WAV export, CLI | done |
 | M4 realtime audio (cpal) | verified on macOS and Pi hardware |
 | M5 Slint UI: transport, track strips (arm/mute/monitor/fader/pan), meters, tape position bar, save/undo, cassette Tapes view, export, real audio | done |
-| M7 stereo bounce bus (change 001) | in progress - engine complete, UI remaining |
+| M7 stereo bounce bus (change 001) | done - shipped in v0.1.0 |
 | M6 Raspberry Pi deployment | in progress - aarch64 build, ALSA/PipeWire device layer, full-duplex record/save, remembered-device auto-connect, kiosk auto-launch with taskbar/desktop icons, and autosave-on-stop all verified on real hardware; performance profiling (M6.2) still open |
 
 Three separate realtime-safety bugs have been found and fixed here,
@@ -82,11 +82,17 @@ and fixed with a regression test.
 The proposal for a dedicated stereo bounce bus
 (`openspec/changes/001-stereo-repeatable-bounce.md`) was **approved
 after twelve rounds of review across thirteen revisions**, every round
-but the last finding a real bug or gap. It is now folded into
-`openspec/spec.md` (v1.1) and the engine side is implemented: real-time
-stereo printing, atomic two-channel undo, bounces that fold forward
-instead of replacing, and the master fader provably never reaching
-tape. The UI surface for the bus's own fader and mute is what remains.
+but the last finding a real bug or gap. It is folded into
+`openspec/spec.md` (v1.1) and fully implemented: real-time stereo
+printing, atomic two-channel undo, bounces that fold forward instead of
+replacing, the master fader provably never reaching tape, and a Bus
+strip in the UI with its own fader and mute.
+
+REQ-902 is measured rather than argued: a test-only counting global
+allocator asserts **zero allocations and zero deallocations** across
+`record -> process_block -> stop`, for both a track pass and a bounce.
+The first time it ran it found four more violations that careful
+reasoning had missed.
 
 Today you drive it through session scripts, the CLI, or the UI.
 `TASKS.md` is the queue.
