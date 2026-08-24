@@ -53,20 +53,28 @@ jobs:
             os: macos-14
             target: aarch64-apple-darwin
             features: realtime,ui
+            native: true
           - name: macos-x86_64
             # No native Intel runner label exists anymore; Xcode's
             # linker on Apple Silicon cross-links x86_64 fine.
             os: macos-14
             target: x86_64-apple-darwin
             features: realtime,ui
+            # Cross-linked on an arm64 runner, so this one binary cannot
+            # be executed where it is built. It gets the static checks
+            # (contents, link audit) and skips the run-it-and-listen
+            # ones, rather than pretending Rosetta is guaranteed here.
+            native: false
           - name: linux-x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             features: realtime,ui
+            native: true
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             features: realtime,ui
+            native: true
           - name: linux-aarch64
             # A genuine ARM machine, not cross-compiled. Built inside a
             # debian:bookworm container rather than the runner's own
@@ -82,6 +90,7 @@ jobs:
             container: debian:bookworm
             target: aarch64-unknown-linux-gnu
             features: realtime,ui
+            native: true
     container: ${{ matrix.container }}
     steps:
       # A bare debian:bookworm image has no git - actions/checkout
@@ -148,6 +157,79 @@ jobs:
             tar czf "$asset" "$stage"
           fi
           echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      # Everything below verifies the PACKAGED asset, not the build
+      # tree. Before this existed the release shipped five binaries that
+      # nothing had ever executed: the gate tests source on one platform,
+      # and the build job only proved the code compiles. That is how
+      # v0.1.0 shipped with the Bounce button styling broken, and why
+      # the glibc 2.39 mismatch had to be found by hand on a real Pi.
+      - name: Verify package contents
+        run: |
+          set -euo pipefail
+          rm -rf verify && mkdir verify
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z x "$ASSET" -overify >/dev/null
+          else
+            tar xzf "$ASSET" -C verify
+          fi
+          stage="verify/$(ls verify)"
+          bin="$stage/porta-app"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then bin="$bin.exe"; fi
+
+          for f in "$bin" "$stage/README.md" "$stage/LICENSE"; do
+            [ -f "$f" ] || { echo "missing from package: $f"; exit 1; }
+          done
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            [ -x "$bin" ] || { echo "not executable: $bin"; exit 1; }
+          fi
+          echo "PORTA_BIN=$PWD/$bin" >> "$GITHUB_ENV"
+          echo "package contents OK"
+
+      # Reads the binary's headers; needs no execution, so it runs even
+      # for the cross-linked macOS x86_64 build. This is the check that
+      # catches the glibc/dylib class of failure before a user does.
+      - name: Link audit
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            macOS) otool -L "$PORTA_BIN" ;;
+            Linux)
+              command -v ldd >/dev/null || { echo "no ldd; skipping"; exit 0; }
+              ldd "$PORTA_BIN"
+              # The oldest glibc symbol the binary demands is what
+              # decides whether it runs on Raspberry Pi OS (bookworm,
+              # glibc 2.36). Surfaced per release rather than discovered
+              # on the hardware.
+              if command -v objdump >/dev/null; then
+                objdump -T "$PORTA_BIN" 2>/dev/null \
+                  | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -5 || true
+              fi
+              ;;
+            Windows) echo "no dependency dump on this runner; skipped" ;;
+          esac
+
+      - name: Smoke test the shipped binary
+        if: matrix.native
+        run: |
+          set -euo pipefail
+          "$PORTA_BIN" --help > /dev/null
+          echo "runs and exits 0"
+
+      # The project's own end-to-end acceptance test, pointed at the
+      # packaged binary instead of a cargo-built one. Proves the artifact
+      # produces the right SOUND, not merely that it starts. Run per
+      # platform, the printed drift figure is also the only real
+      # measurement of cross-platform libm divergence we have.
+      - name: Golden render through the shipped binary
+        if: matrix.native
+        # Same profile, target and features as the Build step above, so
+        # this reuses those artifacts instead of provoking a second,
+        # debug-profile compile of the whole workspace.
+        run: |
+          cargo test --release --target ${{ matrix.target }} \
+            -p porta-app --features "${{ matrix.features }}" \
+            --test golden -- --nocapture
 
       - uses: actions/upload-artifact@v4
         with:

@@ -35,6 +35,19 @@ const GOLDEN: &str = "tests/golden/session.wav";
 /// showed up as five LSBs on far fewer samples, and would still fail.
 const TOLERANCE: i32 = 3;
 
+/// Which `porta-app` renders the session.
+///
+/// Defaults to the one cargo just built, which is what a normal
+/// `cargo test` wants. `PORTA_BIN` overrides it so the release workflow
+/// can point this same test at an **unpacked release artifact** and
+/// verify the binary users actually download - the shipped binaries were
+/// otherwise never executed by anything before publishing.
+fn porta_bin() -> PathBuf {
+    std::env::var_os("PORTA_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_porta-app")))
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -116,7 +129,7 @@ fn render_session(dir: &Path) -> PathBuf {
     )
     .unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_porta-app"))
+    let out = Command::new(porta_bin())
         .arg("script")
         .arg(&script)
         .output()
@@ -136,6 +149,14 @@ fn full_session_matches_the_golden_render() {
     let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join(GOLDEN);
 
     if std::env::var("UPDATE_GOLDEN").is_ok() {
+        // Blessing from an arbitrary binary would pin the golden to
+        // whatever that binary happens to do, which is the opposite of
+        // what the golden is for. Bless from a source build only.
+        assert!(
+            std::env::var_os("PORTA_BIN").is_none(),
+            "refusing to bless the golden from PORTA_BIN; \
+             unset it and bless from a cargo-built binary"
+        );
         std::fs::create_dir_all(golden.parent().unwrap()).unwrap();
         std::fs::copy(&rendered, &golden).unwrap();
         eprintln!("blessed {}", golden.display());
@@ -176,6 +197,16 @@ fn full_session_matches_the_golden_render() {
             over_tolerance += 1;
         }
     }
+    // Printed on success too, not only on failure: run per-platform in
+    // the release workflow this is the actual measurement of how far
+    // libm drift moves the render, which is otherwise only asserted
+    // about in comments. `--nocapture` to see it.
+    eprintln!(
+        "golden drift: worst {worst} LSB at sample {worst_at}, \
+         {any_difference}/{} samples differ, tolerance {TOLERANCE}",
+        want.len()
+    );
+
     assert_eq!(
         over_tolerance,
         0,
