@@ -17,8 +17,9 @@ of taste.
 
 (`porta_testkit::signal::sine` takes **peak** dBFS, so raw RMS readings
 sit 3.01 dB below the nominal figure. Everything below is corrected for
-that. The THD column at quiet levels is dominated by the -66 dBFS hiss
-bed rather than by distortion - see REQ-714's measurement point.)
+that. "Gain" throughout this document means **fundamental-band gain**,
+not broadband RMS; the two differ by up to 0.25 dB at the hot end, and
+REQ-713's own anchor is the fundamental.)
 
 ### 1.1 The chain hard-limits at about -9 dBFS peak, and over-distorts getting there
 
@@ -181,7 +182,40 @@ that satisfies REQ-715 as a bonus:
 f(x) = x / (1 + |x|)
 ```
 
-Measured on that curve: gain -0.007 dB at -60 dBFS and -0.230 dB at
+**`drive_db` selects the knee exponent, not a pre-gain.** This has to
+be stated, because every other reading fails a requirement, and it is
+the first question task (b) faces. Writing `n` for the exponent in
+`f(x) = x/(1+|x|^n)^(1/n)`:
+
+```
+n = 10^((9 - drive_db) / 20)
+```
+
+so the default `drive_db: 9.0` gives `n = 1.0`, exactly the curve
+below. The rejected alternatives, all measured: keeping drive as a
+multiplier with `makeup = 1/drive` reproduces the **-9 dBFS ceiling**
+this change exists to remove; with `makeup = 1` it gives **+9 dB of
+gain**, failing REQ-713 by 18x (3.2b's own `gain = d*m`,
+`asymptote = m` argument applies to *any* drive-scaled family, not
+only tanh); and `x/(1+k|x|)` with `k = drive` puts the asymptote at
+`1/k`, again -9 dBFS at the default. Ignoring `drive_db` entirely
+breaks `clean()`, which is load-bearing for REQ-716.
+
+Under this mapping `clean()`'s `drive_db: -30.0` gives `n = 89`, which
+is numerically a wire: **+0.0000 dB gain and 0.0000% THD at 0 VU**,
+peak -0.07 dBFS. That is what keeps REQ-716's transparency claim true
+and the punch-crossfade, REQ-306 and click-detector suites passing.
+The mapping is monotone: `drive_db` 0 gives 0.03% THD, 6 gives 0.77%,
+9 gives 2.01%, 12 gives 3.90%.
+
+**REQ-707/713/714's windows are stated for the default character.** At
+`drive_db: 12` the curve reads -0.906 dB at -30 dBFS, outside
+REQ-713 - correctly, because a hotter character is *meant* to
+saturate earlier. This is why section 4.3 pins `MEASURE_CURVE` to the
+default drive; the requirements bound the formulation, not every
+character a user can build.
+
+Measured on the default curve: gain -0.007 dB at -60 dBFS and -0.230 dB at
 -30 dBFS (REQ-713), **THD 2.01% at 0 VU** (REQ-714), asymptote exactly
 1.0 and bounded under abuse (REQ-707), and it is **pure add / abs /
 divide - no transcendental at all**, so REQ-715 holds by construction.
@@ -331,13 +365,18 @@ audited by reading down.
   REQ-702's bit-reproducibility does not depend on an implementation
   coin-flip.
 - **REQ-701** (record chain stages): rewritten for two models, and
-  **corrected**. Its current text lists "saturation, bandwidth, hiss,
-  wow/flutter, optional bitcrush"; `build_chain` actually builds
+  **corrected**. Its current text lists "saturation, bandwidth,
+  **wow/flutter, hiss**, optional bitcrush, then TPDF dither";
+  `build_chain` actually builds
   `Saturation, Hiss, Bandwidth, Flutter, Crush`, and `character.rs`
   argues the hiss-before-bandwidth order deliberately (hiss printed
   inside the passband is what makes generations pile up; after the
   filter the next generation just removes it again). The code is right
-  and the spec text is stale. `site/architecture.md` and its Spanish
+  and the spec text is stale - and hiss is **two** positions out, not
+  one. Note also that **spec.md is internally inconsistent today**:
+  REQ-402 already reads "saturation, hiss, bandwidth, optional crush",
+  matching the code, while REQ-701 does not. The amendment brings 701
+  into line with both 402 and the code. `site/architecture.md` and its Spanish
   twin repeat the stale order and need the same correction. Drafted
   replacement:
 
@@ -353,6 +392,15 @@ audited by reading down.
   The dither stage is called out because it is the one part of the
   chain this change must not touch, and it was absent from v5's
   description entirely.
+- **REQ-702** (bit-reproducibility): restated to cover the new
+  stochastic elements (modulation noise, dropouts, scrape flutter),
+  each from its own seeded stream, for both models - and to keep its
+  cross-platform bound intact, which REQ-715 is what enforces. **If
+  bit-exact portability proves impossible in practice, the fallback is
+  an explicit amendment to REQ-702 and to `golden.rs`'s tolerance - a
+  spec change in its own right, not something to absorb silently.**
+  That matters because REQ-715's only end-to-end enforcement is a
+  `[manual]` cross-platform check.
 - **REQ-703** (bounded per-sample work) and **REQ-704** (chain
   swappability for engine testing): both stay load-bearing and both
   live in spec.md **section 4.7**, not section 5 - so 4.4's "all of
@@ -362,10 +410,6 @@ audited by reading down.
 - **REQ-804** (`Op::New` script fields): gains an **optional** `model`
   field. Optional matters - without it, existing scripts keep working
   and keep rendering as they do today.
-- **REQ-702** (bit-reproducibility): restated to cover the new
-  stochastic elements (modulation noise, dropouts, scrape flutter),
-  each from its own seeded stream, for both models - and to keep its
-  cross-platform bound intact, which REQ-715 is what enforces.
 - **REQ-905** (Pi headroom): gains the two-model obligation in REQ-711.
 - **spec.md section 6** (acceptance gates): **M3's gate** says "the
   single golden render passes" and becomes both goldens. **M4's gate**
@@ -386,7 +430,10 @@ audited by reading down.
   reference committed to the repo.
 - **REQ-707**: Under `Full`, the record path MUST NOT impose an output
   ceiling below full scale. Concretely, on the saturation stage in
-  isolation, **a 0 dBFS sine MUST produce peak output at or above
+  isolation - meaning **whatever stage occupies the nonlinear slot**:
+  the saturation curve under `Simple` and under the intermediate
+  `Full` build, and the hysteresis solver once item (a) lands (see
+  REQ-720) - **a 0 dBFS sine MUST produce peak output at or above
   -7 dBFS**, and output MUST continue to rise with input above that.
   The current saturator caps at **-9.06 dBFS** for any input whatever
   and fails this; `x/(1+|x|)` gives -6.02 dBFS and passes.
@@ -448,9 +495,11 @@ audited by reading down.
   `thd_db` sums each partial over +/-2 bins (+/-2 Hz at 48 000
   samples) while the default character's 12-cent flutter smears a
   1 kHz fundamental by +/-6.9 Hz and its 7th harmonic by +/-48 Hz, so
-  on a fluttering signal the reading is meaningless; and at quiet
-  levels the -66 dBFS hiss bed dominates, which is what section 1.1's
-  flat -50/-49 dB readings actually are.
+  on a fluttering signal the reading is meaningless. The hiss bed
+  matters for the same reason at quiet levels: read through the full
+  default chain, THD below about -24 dBFS is dominated by the -66 dBFS
+  bed rather than by distortion. (Section 1.1's table is measured at
+  this requirement's own point, so it shows neither effect.)
 - **REQ-715**: Under `Full`, no operation on any feedback path may be
   other than bit-exact-portable across IEEE-754 platforms (add,
   subtract, multiply, divide, sqrt). Specifically: the Langevin table
@@ -492,8 +541,19 @@ audited by reading down.
   ceiling and then adding low-frequency gain **after** it would let
   bass-heavy material reach the clamp first, reinstating a hard
   limiter by the back door.
+- **REQ-719**: If REQ-711's measurement shows `Full` does not fit at
+  128-256 frames, the creation default MAY be platform-dependent, by
+  this explicit exception rather than by accident. That `cfg` decision
+  lives in **porta-app**, not the engine (REQ-901).
 - **REQ-720**: Under `Full`, the record path MUST exhibit **magnetic
-  hysteresis**: on a slow triangle sweep of amplitude A, the minor-loop
+  hysteresis**, **and the hysteresis solver MUST itself satisfy
+  REQ-707, REQ-713 and REQ-714**. The second clause is what stops item
+  (a) from silently undoing item (b): hysteresis *replaces* the
+  waveshaper, so whatever curve task (b) chooses is discarded when (a)
+  lands, and a solver that reintroduced a -9 dBFS ceiling would pass
+  the minor-loop test below without complaint. The transfer-curve
+  tests are therefore run **twice**, once at (b) and again at (a).
+  Concretely: on a slow triangle sweep of amplitude A, the minor-loop
   width `|out(rising at x) - out(falling at x)|` measured at `x = A/2`
   MUST exceed a stated margin, and MUST **grow with A**. The
   growth-with-amplitude clause is the discriminator - a linear filter
@@ -505,12 +565,11 @@ audited by reading down.
   energy at f0 +/- the scrape rate** exceeding a stated margin on a
   hiss-free character, and MUST be absent under `Simple`.
 - **REQ-722**: Under `Full`, dropouts MUST occur at a stated rate,
-  depth and duration: for one named seed, an exact count and exact
+  depth and duration. REQ-720, REQ-721 and REQ-722 each defer their
+  numeric threshold to the implementing task; **the measured margin is
+  folded back into the requirement text when that task lands**, so
+  none of them stays permanently unfalsifiable. Specifically: for one named seed, an exact count and exact
   positions; across N stated seeds, a rate window.
-- **REQ-719**: If REQ-711's measurement shows `Full` does not fit at
-  128-256 frames, the creation default MAY be platform-dependent, by
-  this explicit exception rather than by accident. That `cfg` decision
-  lives in **porta-app**, not the engine (REQ-901).
 
 ### 4.3 Measurement characters
 
@@ -576,13 +635,17 @@ value**.
 - **Head bump (REQ-708)**: band energy at 60-80 Hz **2 to 4 dB above**
   the 200 Hz reference and 40 Hz below it, measured **after** the
   existing high-pass.
-- **Modulation noise (REQ-709)**: floor in a gap after loud programme
-  **3 to 12 dB above** the floor after silence.
-- **Level-dependent HF loss (REQ-710)**: HF-to-fundamental ratio **at
-  least 2 dB lower** at 0 dBFS than at -30 dBFS from the same source.
-- **Crosstalk (REQ-712)**: bleed into each adjacent track (1-2, 2-3,
-  3-4) **between -60 and -40 dB** relative to source, on a
-  **hiss-free** character; no bleed into non-adjacent track 4 from
+- **Modulation noise (REQ-709)**: broadband RMS over a **100 ms window
+  beginning 20 ms after** a 1 second 0 VU tone ends, **3 to 12 dB
+  above** the same measurement after 1 second of silence.
+- **Level-dependent HF loss (REQ-710)**: **1 kHz + 8 kHz two-tone**
+  source; 8 kHz over **6-10 kHz** relative to 1 kHz over
+  **0.8-1.2 kHz**, **at least 2 dB lower** at 0 dBFS input than at
+  -30 dBFS.
+- **Crosstalk (REQ-712)**: broadband RMS over a **1 second** 0 VU
+  1 kHz tone; bleed into each adjacent track (1-2, 2-3, 3-4)
+  **between -60 and -40 dB** relative to source, on
+  **`MEASURE_NO_HISS`**; no bleed into non-adjacent track 4 from
   track 1; and **no write to unarmed tracks**, which is REQ-306 and is
   asserted directly.
 - **Scrape flutter (REQ-721)**: **sideband energy at f0 +/- the scrape
@@ -1038,7 +1101,7 @@ stated (N11).
 
 Ready for a fifth review.
 
-**v6 (this revision)**: a fifth review verified the whole saturation
+**v6**: a fifth review verified the whole saturation
 analysis independently - every figure in 3.2b reproduced to three
 decimals, and the tanh-family impossibility argument confirmed and
 tightened (REQ-707 forces `m >= 1`, REQ-713 caps `d <= 1.059`, so THD
@@ -1108,3 +1171,61 @@ transcendental set, since a `mul_add`-only grep would pass a `powf`;
 REQ-711 and REQ-719 given their own bullets.
 
 Ready for a sixth review.
+
+**v7 (this revision)**: a sixth review re-derived every normative number
+in the document - section 1.1's table, 3.2b's curve figures, H3's and
+H4's replacements - and reproduced all of them to the digit. Three
+blocking findings, two of which were real design gaps rather than text
+defects.
+
+- **B1**: the document misquoted **REQ-701's actual text**, the very
+  text this change amends. The real order is saturation → bandwidth →
+  **wow/flutter → hiss** → crush → dither; v6 transposed the last two,
+  which made hiss look one position out of place when it is **two**.
+  Corrected, and the amendment now also records that **spec.md is
+  internally inconsistent today**: REQ-402 already matches the code
+  while REQ-701 does not.
+- **B2**: **nothing said what `drive_db` does under `Full`** - and the
+  document's own algebra ruled out every unstated reading. Drive as a
+  multiplier with `makeup = 1/drive` reproduces the -9 dBFS ceiling the
+  change exists to remove; with `makeup = 1` it gives +9 dB of gain
+  (the error 3.2b already rejects for tanh - and that argument applies
+  to any drive-scaled family, which the document had not noticed);
+  `x/(1+k|x|)` puts the asymptote at `1/k`, -9 dBFS again at the
+  default; ignoring drive breaks `clean()`, which REQ-716 rests on.
+  Resolved by mapping `drive_db` to the **knee exponent**,
+  `n = 10^((9 - drive_db)/20)`. Measured: the default 9.0 dB gives
+  `n = 1.0`, exactly the existence proof, and `clean()`'s -30 dB gives
+  `n = 89` - **+0.0000 dB gain, 0.0000% THD**, a literal wire, which is
+  what keeps the punch-crossfade, REQ-306 and click-detector suites
+  passing. Also stated: the windows are for the **default** character,
+  since `drive_db: 12` legitimately falls outside REQ-713.
+- **B3**: REQ-707/713/714 measure "the saturation stage", which
+  finished `Full` **does not have** - item (a) replaces it with the
+  solver. So the requirements had no referent in the state they
+  describe, and worse, **whatever curve task (b) picks is discarded by
+  task (a)** with nothing requiring the solver to preserve it: a J-A
+  solver that reintroduced a -9 dBFS ceiling would have passed REQ-720
+  cleanly. REQ-707 now names the nonlinear slot rather than a
+  particular occupant, and REQ-720 requires the solver to satisfy all
+  three - so the transfer-curve tests run **twice**, at (b) and at (a).
+
+Notes taken: **N1** - v6's own corrected table left two passages
+describing the *pre*-correction one (the "flat -50/-49 dB" back-
+reference no longer existed anywhere), and "gain" is now defined once
+as fundamental-band rather than broadband RMS, which differ by up to
+0.25 dB at the hot end; **N2** - strict id order broke again when v6's
+restorations and REQ-720-722 landed, now monotonic in both groups;
+**N3** - the new measurement windows had landed in the requirements but
+not in the matching verification bullets, which is the document's own
+stated rule; **N5** - the three newest requirements defer their
+thresholds to their tasks, now with an explicit commitment to fold the
+measured margin back into the requirement; **N6b** - REQ-715's failure
+path (amend REQ-702 and the golden tolerance openly, never absorb it
+silently) had been dropped in the v5 rewrite and is restored.
+
+The review's own bottom line: the analysis is sound and independently
+reproducible, and what stood between this and implementation was one
+misquote and two unanswered questions. Those are answered. Sent for a
+seventh review scoped to the new B2/B3 material only, since the
+`drive_db` mapping is a design decision no reviewer has seen.
