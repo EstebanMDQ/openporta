@@ -92,9 +92,12 @@ front door that does not.
 Double-clicking supplies no path, so one has to be chosen. Order,
 first hit wins:
 
-1. The cassette the UI last had open, if it still exists.
+1. The cassette the UI last had open, **if it opens as a cassette**.
+   Existence is not openability - a remembered path may now be a file,
+   or a directory whose manifest is gone. A failed step 1 falls through
+   to step 2 and MUST NOT create anything at the remembered path.
 2. Otherwise the **default cassette** at a fixed, documented path -
-   **opened if it is already there, created only if it is not**.
+   **opened if anything is already there, created only if nothing is**.
 
 **Step 2's two halves are not a detail, they are the whole safety of
 this feature (a first review caught the single-step version as tape
@@ -113,14 +116,51 @@ step 1 would miss every time, and step 2 would fire at the same fixed
 path on **every** double-click. Under a create-unconditionally rule
 that is tape loss on the second launch of the app.
 
-So, normatively: the resolution path MUST NOT invoke any
-cassette-creating API against a directory that already contains a
-`manifest.json`. It MUST open what is there.
+**The occupancy test is "is the directory non-empty", NOT "does it
+contain a manifest.json"** - a second review caught the manifest
+version as still destructive, and it is right. `create_with_character`
+writes the manifest **last**, after truncating all six raw files, so a
+directory holding tape audio with a missing or unreadable manifest
+(a crash mid-create, an interrupted copy, a hand-edited or deleted
+manifest) would *pass* a manifest-keyed guard and have its audio
+destroyed. That is exactly the case where the raw audio is the only
+thing left worth saving.
 
-Neither branch may be an error dialog. A first-ever launch landing on a
-usable blank tape is the entire point; being told to go away and pass a
-command-line argument is not. Equally, deleting or moving a cassette
-MUST NOT leave the app unable to start.
+So, normatively, resolution against a candidate directory:
+
+- **Absent or empty** -> create a cassette there and open it.
+- **Non-empty and it opens as a cassette** -> open it.
+- **Non-empty and it does not open** -> report the reason and exit
+  non-zero, having created, truncated or overwritten **nothing**.
+
+The third branch is a legitimate start failure, and saying so resolves
+a contradiction the previous version carried (it demanded both "never
+create over an existing cassette" and "never fail to start", which
+cannot both hold for a corrupt one). "MUST NOT fail to start" is scoped
+to what it can actually promise: when the default path is absent or
+holds a readable cassette. A corrupt or unwritable default is worth
+failing over, with a reason - silently truncating it is not.
+
+**Belt and braces, in the engine rather than in the caller.**
+`create_with_character` MUST open the six raw files with
+`create_new(true)` and fail if they already exist, instead of
+`File::create`'s truncate. That turns the safety property from "every
+caller remembers to check first" into "the API cannot truncate", and it
+closes the check-then-act race two double-clicks in quick succession
+would otherwise open (both see an absent default, both create, the
+second truncates under the first). Stated as a consequence rather than
+discovered later: `porta-app new <existing-dir>` today silently wipes a
+cassette, and this turns that into an error. That is a fix, but it is a
+user-visible behaviour change and belongs in the record.
+
+**The auto-created cassette's parameters are `porta-app new`'s
+defaults** - 15 minutes, the cassette character, seed 0 - so a first
+run is deterministic and REQ-103's seed identity is specified rather
+than incidental.
+
+A first-ever launch landing on a usable blank tape is the entire point;
+being told to go away and pass a command-line argument is not. Equally,
+deleting or moving a cassette MUST NOT leave the app unable to start.
 
 **Where things live**, named rather than hand-waved as "a per-user
 location":
@@ -133,6 +173,9 @@ location":
   they will never find. It also matches what `deploy/kiosk-launch.sh`
   and both `.desktop` files already hardcode, so the project keeps one
   convention instead of two.
+- The remembered path MUST be stored **absolute**: the working
+  directory differs between a double-click and a terminal launch, so a
+  relative one would resolve to different cassettes.
 - The **remembered path** goes in its own small file beside the device
   config (`~/.config/openporta/session.json`), **not** as a new field
   on `DeviceConfig`. That struct is device-keyed and lives in a file
@@ -231,9 +274,11 @@ them without caveats:
 
 - **REQ-1001 (new)**: Invoked with no arguments, a build including the
   UI MUST open the UI in windowed mode on a cassette; a build without
-  the UI MUST print usage. `--help` MUST print usage in both. If the
-  UI cannot be opened, the binary MUST print usage and a one-line
-  reason and exit non-zero, without hanging or panicking.
+  the UI MUST print usage. `--help` MUST print usage in both.
+- **REQ-1005 (new)**: If the UI cannot be opened, the binary MUST print
+  the usage text and a one-line reason and exit non-zero, without
+  hanging and without panicking. (Its own id rather than a clause of
+  REQ-1001: it has its own dedicated CI assertion.)
 - **REQ-1002 (new)**: **When the UI is started without a cassette
   path**, it MUST open the cassette it last had open, if that still
   exists. Otherwise it MUST open the default cassette at a documented,
@@ -250,21 +295,30 @@ them without caveats:
   no longer copied, and the required headings and the unsigned-build
   statement are present. Whether the prose is any good stays
   `[manual]`.
-- **REQ-1004 (new)**: The path of the last-opened cassette MUST be
-  remembered per install, outside any cassette and separately from the
-  device configuration, and MUST be updated whenever the open cassette
-  changes, on the control thread only.
+- **REQ-1004 (new)**: The **absolute** path of the last-opened cassette
+  MUST be remembered **per user**, outside any cassette and separately
+  from the device configuration, and MUST be updated whenever the open
+  cassette changes - including an explicit `porta-app ui <dir>`, or CLI
+  and kiosk users would never accumulate a remembered value at all. The
+  update happens on the control thread only, and a failure to write it
+  MUST NOT fail an open that already succeeded (the same best-effort
+  policy `device_config::remember` already uses).
 
 - No existing requirement is reversed. REQ-901's feature-gating and
   REQ-902's realtime rules are untouched - none of this reaches the
   audio callback.
-- Section 2 (Scope) is untouched: this changes how the existing UI is
-  reached, and adds no capability.
+- **Section 2 (Scope)** gains one in-scope line - "prebuilt release
+  archives for the shipped platforms, and the first-run documentation
+  that ships with them" - so section 7 has something to hang from.
+  Today scope mentions distribution neither in nor out, which would
+  leave the new requirements without an anchor. No capability is added:
+  this changes how the existing UI is reached.
 
 Numbering note, corrected (a first review caught the original: it said
 "a new section 6", and `spec.md` section 6 already exists - "Acceptance
-gates per milestone"). These land in a **new section 7, "Packaging and
-distribution"**, appended after the acceptance gates so that nothing
+gates per milestone"). These land in a **new section 7, "Distribution and first run"**
+(named for what it actually holds: REQ-1003 is packaging, but 1001,
+1002, 1004 and 1005 are launch and session behaviour), appended after the acceptance gates so that nothing
 existing is renumbered and no cross-reference anywhere goes stale.
 
 The `10xx` ids stand: 4.1..4.8 own `1xx..8xx`, section 5 owns `9xx`, so
@@ -284,9 +338,25 @@ commit - only `release.yml` builds it, and only on a tag or dispatch. A
 change to `ui.rs` cannot fail CI today, and this proposal touches
 `ui.rs`. Two consequences, both required:
 
-- **A CI job MUST run at least `cargo clippy --features realtime,ui
-  --all-targets -- -D warnings`**, so the feature this proposal edits
-  is actually built on every commit.
+- **A CI job MUST build, lint AND run the `realtime,ui` build on every
+  commit.** Three details, because a second review found the original
+  one-line version would not have worked at all:
+  - `ci.yml` installs no system packages today. The job needs exactly
+    what `release.yml` already installs for its Linux legs:
+    `pkg-config libasound2-dev libpipewire-0.3-dev libclang-dev
+    libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+    libfontconfig-dev`. Without them the required job fails on its
+    first commit.
+  - `cargo clippy` alone executes nothing, and the headless assertion
+    below needs the binary to actually run. So: `cargo clippy
+    --features realtime,ui --all-targets -- -D warnings` **and**
+    `cargo test --features realtime,ui --workspace`.
+  - "MUST NOT hang" is only an assertion if it is bounded. The headless
+    check runs under an explicit timeout (`timeout 30 ./porta-app` or a
+    spawned child with a bounded wait) and asserts a non-zero exit
+    within it. Unbounded, the job would sit until the runner's own
+    limit and the requirement would quietly become a hope - the failure
+    mode this proposal is careful about everywhere else.
 - **Extracting a "pure function" is necessary but not sufficient.** If
   that function asks `cfg!(feature = "ui")` internally, the
   UI-available arm is unreachable in CI's build and the very test that
@@ -313,9 +383,18 @@ change to `ui.rs` cannot fail CI today, and this proposal touches
   default; nothing remembered -> default; the resolution never returns
   an error case. **And the one that guards the tape-loss hazard: the
   default location already holds a cassette -> it is OPENED, and its
-  track and bus files are byte-identical afterwards.** That assertion
-  is the difference between this feature and a data-loss bug, so it is
-  named here rather than left to implementation judgement.
+  four track files, both bus channels, `manifest.json` and the `undo/`
+  directory are all byte-identical afterwards.** The manifest matters
+  as much as the audio: the character seed lives there (REQ-103), so a
+  rewritten manifest changes the tape's identity even if every sample
+  survives. That assertion is the difference between this feature and a
+  data-loss bug, so it is named here rather than left to implementation
+  judgement.
+- The hazard's other two shapes, also named: a directory holding raw
+  tape files but **no readable manifest** -> reported, exit non-zero,
+  nothing written (this is the case a manifest-keyed guard would have
+  destroyed); and a remembered path that is **not a cassette** -> falls
+  through to the default, with nothing created at the remembered path.
 - Round-trip test for the remembered path through its config file,
   including a config written before this field existed.
 - A packaging test asserting the release README exists and that the
@@ -425,3 +504,41 @@ an explicit path argument; the remembered path was going into
 `audio.json`, where a deserialization failure would silently discard
 every remembered input map (REQ-908); and there was no Impact-on-tasks
 section. Ready for a second review.
+
+**v3 (this revision)**: the second review returned **APPROVE WITH
+NOTES**, with two must-fix edits before implementation - both applied.
+
+The tape-loss guard was **still destructive**, keyed on the wrong file.
+`create_with_character` writes `manifest.json` *last*, after truncating
+all six raw files, so a directory holding tape audio with a missing or
+unreadable manifest would pass a manifest-keyed check and lose its
+audio - the exact case where the raw files are the only thing left. The
+occupancy test is now "non-empty directory", with three explicit
+branches (absent -> create; opens -> open; occupied but won't open ->
+report and exit non-zero, writing nothing). That third branch also
+resolves a contradiction the previous version carried, which demanded
+both "never create over existing" and "never fail to start". Belt and
+braces added in the engine as well: `create_new(true)` instead of
+`File::create`, so the API cannot truncate at all and the two-launch
+race closes for free - noting honestly that this turns today's silent
+`porta-app new <existing-dir>` wipe into an error.
+
+The required CI job **would not have run**: `ci.yml` installs no system
+packages, `clippy` alone executes nothing, and an unbounded "MUST NOT
+hang" is not an assertion. Now specifies the exact package list
+`release.yml` already uses, requires `cargo test --features
+realtime,ui`, and bounds the headless check with a timeout.
+
+Also: the byte-identical assertion widened to the manifest and `undo/`
+(the character seed lives in the manifest, so a rewritten one changes
+the tape's identity even if every sample survives); step 1 changed from
+"still exists" to "opens as a cassette", falling through without
+creating at the remembered path; the remembered path specified as
+absolute and per-user (not "per install" - two installs share one
+`~/.config`), updated by explicit `ui <dir>` too, best-effort on write;
+the cannot-open contract split into REQ-1005 since it has its own CI
+assertion; section 7 renamed "Distribution and first run" for what it
+actually holds; and section 2 gains a scope line so the new
+requirements have an anchor.
+
+**Status: APPROVED.** Ready to implement; not yet started.
