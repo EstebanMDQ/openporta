@@ -206,6 +206,20 @@ rate-limited coefficient update at a stated interval - and whichever is
 chosen, its update rate MUST NOT make the result depend on block size
 (see the invariance note below).
 
+**Every `Full` stage MUST be parameterised on `TapeCharacter`, and
+`clean()` MUST zero all of them.** This is what keeps the default flip
+safe, and a second review found it was missing: 23 call sites use
+`Engine::create()` (default character) and 32 use
+`TapeCharacter::clean()`, and because model is orthogonal to character,
+*all of them* become `Full` renders the moment the default flips -
+including the near-transparent `clean()` paths that the punch-crossfade,
+REQ-306 and click-detector tests rest on. As drafted, dropouts and
+crosstalk had no character parameter at all, so `clean()` could not
+switch them off and "clean stays near-transparent" would simply have
+been false. Either every stage gets a parameter `clean()` zeroes (the
+choice here), or the whole engine suite has to pin `Simple` - which
+would leave `Full` untested at the engine level.
+
 **f. Scrape flutter.** A third modulation term, fast (order 100 Hz+),
 in `FlutterModulator` - drawing from its **own** RNG stream, per the
 rule above. Shared between the bounce bus's two channels like the rest
@@ -292,7 +306,11 @@ should be asserted rather than assumed.
   near-transparent and stays the formulation tests use when they want
   mechanics without colour.
 - Nothing reaches the audio callback that allocates or locks
-  (REQ-902), and every added stage is per-sample so REQ-203 holds.
+  (REQ-902). Every added stage is per-sample, so each is invariant to
+  block size - **not** "so REQ-203 holds": REQ-203 is about playhead
+  position, and this document cited it wrongly for audio content in a
+  third place after the other two were corrected. Grep before
+  believing a citation is fixed.
 
 ## Requirements affected
 
@@ -333,9 +351,21 @@ chain) already owns; REQ-701..704 exist, so these are REQ-705 onward.
   including the sequence of random draws. New stochastic stages MUST
   use their own independent streams.
 - **REQ-707**: Under `Full`, the record path MUST NOT impose an output
-  ceiling below full scale. Referenced to 0 VU = -18 dBFS: gain MUST be
-  within 0.5 dB of unity below 0 VU, and THD at 0 VU MUST fall between
+  ceiling below full scale.
+- **REQ-713**: Under `Full`, gain MUST be within 0.5 dB of unity at and
+  below -30 dBFS.
+- **REQ-714**: Under `Full`, THD at 0 VU (= -18 dBFS) MUST fall between
   1% and 3%.
+
+  REQ-713 and REQ-714 were one requirement until a second review did
+  the arithmetic and found it **over-constrained**: for any smooth odd
+  compressive curve, fundamental gain is approximately `1 - 3*THD`, so
+  3% THD implies -0.82 dB of gain at that level, and by continuity just
+  below it too. "Within 0.5 dB of unity below 0 VU" and "1-3% THD at
+  0 VU" therefore only co-exist for THD below about 1.9%. Anchoring the
+  gain bound at **-30 dBFS and below** - well clear of where
+  compression starts - keeps the musically-motivated 1-3% window
+  instead of narrowing it to satisfy an accidentally tight constraint.
 - **REQ-708**: Under `Full`, the record path MUST apply a low-frequency
   resonance ("head bump") such that band energy around 60-80 Hz is
   above the 200 Hz reference, while 40 Hz remains below it - a bump,
@@ -358,8 +388,24 @@ chain) already owns; REQ-701..704 exist, so these are REQ-705 onward.
   crosstalk at a stated level. Crosstalk MUST NOT write to unarmed
   tracks (REQ-306 is preserved).
 
-**Untouched**: REQ-104, REQ-301, REQ-302, all of 4.4 (the bus prints
-through whatever model the cassette has), REQ-703 (which stays
+- **REQ-402**: amended, not untouched (a second review caught this).
+  It enumerates the bus's per-channel stage set verbatim - "saturation,
+  hiss, bandwidth, optional crush, with wow/flutter shared between L
+  and R" - and under `Full` there are more stages, so the list goes
+  stale exactly as REQ-701's did. The amendment states where each new
+  stage sits relative to `build_split_chain`'s cut at flutter, and
+  settles the one case that is not obvious: **dropouts on the bus are
+  SHARED between L and R, from one stream, like the flutter
+  modulator** - not independently seeded per channel. A dropout models
+  a physical defect at a tape position, and a defect does not politely
+  strike the left stripe and the right stripe at different moments.
+  Independent per-channel seeding would produce a stereo flicker that
+  no tape makes. Head bump, hysteresis and level-dependent HF loss are
+  per-channel (they follow that channel's own signal); crosstalk does
+  not apply to the bus at all, which has no neighbours.
+
+**Untouched**: REQ-104, REQ-301, REQ-302, the rest of 4.4 (the bus
+prints through whatever model the cassette has), REQ-703 (which stays
 load-bearing - see item a's iteration cap and stability constraint),
 REQ-901, REQ-902, and section 2 (this adds no capability and no control
 surface beyond one creation-time flag). **REQ-904**: `Full`'s added
@@ -375,10 +421,18 @@ field. Without it, scripts keep working and get the creation default.
 Every item below is a numeric assertion on an offline render, in the
 style the DSP suite already uses - no listening required.
 
-- **Transfer curve**: at -40, -24, -12, -6 and 0 dBFS, assert `Full`'s
-  gain and THD land in stated windows - in particular THD at 0 dBFS
-  between roughly 1% and 3%, and no output ceiling below -3 dBFS. The
-  current chain fails this test today, which is the point.
+- **Transfer curve**: at -40, -30, **-18 (0 VU)**, -12, -6 and 0 dBFS,
+  assert `Full`'s gain and THD land in the windows REQ-707/713/714
+  state - THD between 1% and 3% **at 0 VU**, gain within 0.5 dB of
+  unity at and below -30 dBFS, and no output ceiling below **full
+  scale**. The current chain fails all three today, which is the point.
+  (This bullet previously said "1-3% at 0 dBFS" and "no ceiling below
+  -3 dBFS", contradicting the requirement it was meant to verify, and
+  omitted -18 dBFS - the only level the requirement is written at. A
+  second review caught it. Same failure mode this project has now hit
+  four times: a correction lands in one section and stale text survives
+  in another. After any numeric change here, grep the whole document
+  for the old value.)
 - **Head bump**: band energy at 60-80 Hz MUST be above the 200 Hz
   reference by a stated margin, and 40 Hz MUST be below it - a bump,
   not a shelf.
@@ -405,7 +459,13 @@ style the DSP suite already uses - no listening required.
 - **Both models bit-reproducible**: two renders, same seed, identical
   bytes, for `Full` and `Simple` (REQ-702).
 - **Block-size invariance per new stage**, via
-  `porta_dsp::testing::assert_block_size_invariant`. (Two earlier
+  `porta_dsp::testing::assert_block_size_invariant` - **except
+  crosstalk (h)**, which that helper cannot express: it drives a single
+  mono `AudioProcessor` in isolation, and crosstalk is a property of
+  four tracks advancing together. Crosstalk gets a purpose-written
+  engine-level equivalent (record the same four-track material at two
+  block sizes, compare tape contents), and that test is part of task
+  (h) rather than assumed to come free. (Two earlier
   citations of REQ-203 here were wrong: REQ-203 is about *playhead
   position* under differing block sizes, not audio content. If spec.md
   should carry a DSP-level invariance requirement, that is worth
@@ -420,15 +480,26 @@ style the DSP suite already uses - no listening required.
     `"model": "simple"`), so it never needs re-blessing at all and
     stays a standing regression check on the preserved path.
   - A **second, `Full` golden is blessed once**, at the end of the
-    milestone. Otherwise the default flipping at task (b) would move
+    milestone, **with `"model":"full"` written explicitly into its
+    script**. It must not rely on the creation default: REQ-711 admits
+    a platform-dependent default, which would otherwise render that
+    golden as `Full` on the macOS where it was blessed and `Simple` on
+    Linux CI. Otherwise the default flipping at task (b) would move
     the single golden again at (c), (d), (e), (f), (a) and (g) - seven
     re-blessings, not the promised one.
-  - The preservation assertion itself is **bit-exact equality of an
-    in-crate DSP render on one machine**, not "byte-identical to
-    today's golden": once the golden moves there is nothing left to
-    compare against, and byte-identity across platforms was never what
-    REQ-702 promised anyway - which is exactly why `golden.rs` carries
-    `TOLERANCE = 3`.
+  - The preservation assertion needs something concrete to compare
+    **against**, which v2 still did not supply - it said "bit-exact
+    equality of an in-crate DSP render", equal to what? "The pre-004
+    implementation" is an artifact that stops existing the moment this
+    lands, and `Simple`'s code path is not literally untouched
+    (`Saturation` loses `makeup = 1/drive`, `FlutterModulator` gains a
+    scrape term, `Hiss` gains a modulation term). The Simple-pinned
+    golden does not discharge it either: `golden.rs` compares at
+    `TOLERANCE = 3` LSBs, an envelope check, not bit-identity.
+    **So: a frozen reference is committed to the repo** - an f32 sample
+    vector, or a hash of one, generated from the pre-004 build - in the
+    same task that introduces `TapeModel`, before anything else
+    changes. REQ-706 points at that artifact.
 - **REQ-403 for both models**, three generations, monotonic HF decay
   and monotonic noise-floor rise.
 - [manual] Listening pass on the Pi, both models, before and after.
@@ -437,17 +508,33 @@ style the DSP suite already uses - no listening required.
 
 ## Impact on tasks
 
-- A new milestone. Sized roughly one task per lettered item, ordered:
+- **The enabling layer is one task, scheduled FIRST** - ahead of every
+  lettered item, including (b). A second review found nothing in the
+  plan scheduled it at all, while every task after it silently assumes
+  it exists. It carries: the `TapeModel` type; the `Manifest` field
+  with `Simple` on absent (REQ-710); model-dependent `build_chain` and
+  `build_split_chain`, and the model-dependent **stage indices** that
+  `HISS_STAGE`/`FLUTTER_STAGE`/`SPLIT_HISS_STAGE` currently hardcode as
+  constants; the `--model` CLI flag and the `Op::New` field; the
+  existing golden pinned to `"model":"simple"`; and the **frozen
+  `Simple` reference** described above, which must be captured from the
+  pre-004 build and therefore cannot be produced by any later task.
+  It lands with `Full` still equal to `Simple`, so it is verifiable on
+  its own: same golden, same frozen reference, new plumbing.
+- Then a new milestone, roughly one task per lettered item, ordered:
   headroom (b) first because it is the largest audible defect and the
   cheapest fix; then head bump (c) and modulation noise (d); then
   level-dependent HF (e) and scrape flutter (f); then hysteresis (a),
   which is the big one; then dropouts (g); crosstalk (h) last and
   separable.
-- **One golden regeneration event**, at the point the default model
-  changes - with its TASKS.md note and owner notification, exactly as
-  change 001's was handled. The `Simple`-is-unchanged test above is
-  what proves the re-bless reflects the new default and not an
-  accidental regression.
+- **Golden handling is the two-file plan in Verification above**, not a
+  regeneration: the existing golden is pinned to `Simple` and never
+  re-blessed, and a new `Full` golden is created once at the **end** of
+  the milestone. (This bullet previously carried v1's "one golden
+  regeneration event, at the point the default model changes" - wrong
+  operation and wrong point, and contradicting the section above it.)
+  The new golden still gets its TASKS.md note and owner notification,
+  as change 001's did.
 - **M6.2** (Pi performance pass, still open) gains the two-model
   measurement (REQ-711). Two corrections a first review forced:
   - **The worst case is four `Full` chains in one callback**, not two.
@@ -471,7 +558,20 @@ style the DSP suite already uses - no listening required.
     the period on the Pi and keep `Full`, as M6.2 already contemplates
     for the bus - should be weighed against it at measurement time.
 - `docs/manual-checklist.md` gains the listening pass, marked
-  `[manual]` in the verification list above.
+  `[manual]` in the verification list above. **REQ-711's per-platform
+  measurement is `[manual]` too** - it is a wall-clock measurement on a
+  Pi, not something `cargo test` can assert - and the platform-dependent
+  default it may produce is a `cfg` decision in **porta-app**, not in
+  the engine: REQ-901 keeps hardware knowledge out of the engine, and
+  "which model does this host default to" is hardware knowledge.
+- **`model` lives on `Manifest`, beside `character`, not inside
+  `TapeCharacter`.** `TapeCharacter` is a knob-set that `clean()` can
+  zero; model is a formulation choice orthogonal to it, and putting it
+  inside would make every `TapeCharacter::clean()` call site a
+  model decision too. Consequence to accept knowingly: a pre-004 binary
+  opening a `Full` cassette ignores the unknown field and renders it as
+  `Simple` - no error, just the old sound. Acceptable for a v0.1.x
+  project with one user; worth a line in the release notes.
 - **A porta-testkit task, scheduled first**, for the two measurement
   tools that do not exist yet: sideband energy for scrape flutter, and
   a dip detector for dropouts. The scrape and dropout tasks depend on
@@ -522,7 +622,7 @@ before drafting: build the full model but keep the current one behind a
 flag for constrained devices, and let the improved model become the
 default with a single golden re-bless.
 
-**v2 (this revision)**: a first review returned REVISE with fifteen
+**v2**: a first review returned REVISE with fifteen
 findings; all are addressed. The most consequential were factual
 errors in v1, each verified against the code before fixing:
 
@@ -569,3 +669,66 @@ calls directly; REQ-203 was cited twice for a property it does not
 describe; the Pi worst case is four chains, not two; and the
 consequences of a `Simple`-on-Pi fallback are now stated plainly.
 Ready for a second review.
+
+**v3 (this revision)**: a second review returned REVISE with nine
+blocking findings; all are addressed.
+
+The one worth naming first is **B1**, because it is this document's own
+recurring failure rather than a new mistake: v2's history claims to
+have fixed the missing operating reference on the THD target, and it
+did - in the requirement, while leaving "THD at 0 dBFS between roughly
+1% and 3%" standing in the Verification section, contradicting the very
+requirement that section verifies. A correction landing in one place
+and going stale in another is now the **fourth** instance in this
+proposal (two wrong REQ-203 citations, a stale golden plan, this). The
+verification bullet now carries a standing instruction to grep the
+whole document after any numeric change.
+
+The most substantive finding was **B2**, which the review reached by
+arithmetic rather than by reading: for a smooth odd compressive curve
+fundamental gain is about `1 - 3*THD`, so "3% THD at 0 VU" and "gain
+within 0.5 dB of unity below 0 VU" only co-exist below about 1.9% THD.
+The requirement was over-constrained by accident. It is now split into
+REQ-707 (no ceiling), REQ-713 (gain, anchored at -30 dBFS and below)
+and REQ-714 (THD at 0 VU), which keeps the musically-motivated 1-3%
+window rather than narrowing it to fit.
+
+Also addressed:
+
+- **B4**: the `Simple` preservation check still had nothing to compare
+  against - "bit-exact equality of an in-crate render" is not a claim
+  until something says *equal to what*, and `Simple`'s code path is not
+  literally untouched. A **frozen reference from the pre-004 build** is
+  now committed, in the enabling task, before anything changes.
+- **B7**: nothing scheduled the enabling layer - `TapeModel`, the
+  manifest field, model-dependent chain building and stage indices, the
+  `--model` flag, the golden pin, the frozen reference - while every
+  later task assumed it. It is now one task, scheduled first, landing
+  with `Full` still equal to `Simple`.
+- **B8**: the blast radius of flipping the default was understated. 23
+  `Engine::create()` and 32 `TapeCharacter::clean()` call sites become
+  `Full` renders, and dropouts and crosstalk had no character parameter
+  at all - so `clean()` could not have switched them off and "clean
+  stays near-transparent" would have been false. Every `Full` stage is
+  now required to be character-parameterised.
+- **B6**: REQ-402 was listed untouched but enumerates the bus's stage
+  set verbatim. Amended - and the open question it exposed is settled:
+  bus dropouts are **shared** between L and R, since a physical defect
+  does not strike two stripes at different moments.
+- **B3** (stale golden bullet deleted), **B5** (the `Full` golden pins
+  `"model":"full"` rather than trusting a platform-dependent default),
+  **B9** (the bit-exactness constraint governs all of `Full`'s signal
+  path, not only the solver, with the review's three preconditions:
+  compile-time literal Langevin table, no `mul_add` on feedback paths,
+  a stated denormal policy).
+
+The review also confirmed the two positions v2 asked about - REQ-702's
+bit-exactness is achievable under those preconditions, and the
+two-golden plan is implementable as `golden.rs` and `Op::New` stand -
+and answered the third: REQ-707's curve was not coherent, which is B2.
+Non-blocking notes taken: REQ-711's measurement is `[manual]` and its
+platform default belongs in porta-app, not the engine (REQ-901);
+`model` lives on `Manifest` beside `character`, with the forward-compat
+consequence stated; and `assert_block_size_invariant` cannot express
+crosstalk, which gets a purpose-written engine-level test instead.
+Ready for a third review.
