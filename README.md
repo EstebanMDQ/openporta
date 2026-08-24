@@ -83,7 +83,7 @@ The proposal for a dedicated stereo bounce bus
 (`openspec/changes/001-stereo-repeatable-bounce.md`) was **approved
 after twelve rounds of review across thirteen revisions**, every round
 but the last finding a real bug or gap. It is folded into
-`openspec/spec.md` (v1.1) and fully implemented: real-time stereo
+`openspec/spec.md` and fully implemented: real-time stereo
 printing, atomic two-channel undo, bounces that fold forward instead of
 replacing, the master fader provably never reaching tape, and a Bus
 strip in the UI with its own fader and mute.

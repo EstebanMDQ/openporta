@@ -1,9 +1,9 @@
 # openporta Specification
 
-Version 1.1 (amended by change 001, stereo bounce bus - see
-`openspec/changes/001-stereo-repeatable-bounce.md` for the full design
-and its 13-revision review history). This document is the constitution
-of the project. The decisions
+Version 1.2 (amended by change 001, the stereo bounce bus, and change
+002, per-track input selection - see `openspec/changes/` for each
+proposal's full design and review history). This document is the
+constitution of the project. The decisions
 in it are settled. Changing user-visible behavior or reversing a settled
 decision REQUIRES a proposal in `openspec/changes/` reviewed by the
 spec-reviewer agent, and a notification to the owner BEFORE implementation.
@@ -108,6 +108,13 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
   pass. Symmetrically, the bounce bus MUST be byte-identical across an
   ordinary track pass, and tracks 1-4 MUST be byte-identical across a
   bounce (both already guaranteed by REQ-405's mutual exclusivity).
+- REQ-307 When recording from a realtime input device, each track MUST
+  take its signal from a user-assigned input channel of that device. A
+  track with no assignment, or one assigned a channel the device does
+  not provide, MUST record silence without affecting any other track.
+  Two tracks MAY be assigned the same channel; their tape content will
+  still differ, since each pass runs its own character chain with its
+  own seed (REQ-304).
 
 ### 4.4 Bounce
 
@@ -242,6 +249,17 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
 - REQ-905 Realtime operation on the Pi SHOULD target a 128-256 frame period
   at 48kHz; 64 frames is NOT a requirement.
 - REQ-906 The full test suite MUST pass headlessly in CI on every commit.
+- REQ-907 Input channel assignments MUST be settable per track from both
+  the UI and the CLI, using 1-based channel numbers matching what the
+  probe command displays, and each surface MUST report the resolved
+  per-track assignment (including tracks recording silence) at connect
+  time. A malformed assignment MUST block the connection and surface the
+  error; it MUST NOT fall back to a default or previously remembered
+  assignment.
+- REQ-908 Input channel assignments MUST persist per input device, not
+  per cassette - wiring is a property of the physical setup. A
+  configuration written by an earlier version MUST load with identical
+  routing and without user intervention.
 
 ## 6. Acceptance gates per milestone
 

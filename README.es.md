@@ -90,7 +90,7 @@ La propuesta de un bus de mezcla estéreo dedicado
 (`openspec/changes/001-stereo-repeatable-bounce.md`) fue **aprobada
 tras doce rondas de revisión a lo largo de trece revisiones**, y todas
 las rondas menos la última encontraron un error o un hueco real. Ya
-está incorporada a `openspec/spec.md` (v1.1) y completamente
+está incorporada a `openspec/spec.md` y completamente
 implementada: impresión estéreo en tiempo real, deshacer atómico de dos
 canales, mezclas que se pliegan hacia adelante en vez de reemplazarse,
 el fader master demostrablemente sin llegar nunca a la cinta, y una

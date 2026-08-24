@@ -1,13 +1,15 @@
 # 002: Per-track input channel selection
 
-> **Status: ACCEPTED and IMPLEMENTED.** Approved at review round 2 (v2,
-> "APPROVE WITH NOTES"; notes folded into v3) and signed off by the
-> owner. Implemented under M6.1 and shipped in v0.1.0: `--in-map`
-> replaces `--in-offset`, the UI's offset field became an "Input
-> channels" list, and offset-era `audio.json` entries migrate on load.
-> Verified on the real Pi against a Zoom L6. REQ-907/908/909 still need
-> transcribing into `openspec/spec.md` - see the note at the end of
-> this document.
+> **Status: ACCEPTED, IMPLEMENTED, and FOLDED INTO THE SPEC.** Approved
+> at review round 2 (v2, "APPROVE WITH NOTES"; notes folded into v3) and
+> signed off by the owner. Implemented under M6.1 and shipped in v0.1.0:
+> `--in-map` replaces `--in-offset`, the UI's offset field became an
+> "Input channels" list, and offset-era `audio.json` entries migrate on
+> load. Verified on the real Pi against a Zoom L6. The requirements are
+> now in `openspec/spec.md` v1.2 - **as REQ-307, REQ-907 and REQ-908,
+> not the REQ-907/908/909 drafted below**; see "How these landed in the
+> spec" at the end. `spec.md` is the authority; this document is the
+> design record.
 
 ## Motivation
 
@@ -429,10 +431,31 @@ wipe; zero-assigned maps are documented as never persisted (the
 not an accident); and a valueless `--in-map` errors the same way
 `--in-offset` does. Awaiting owner sign-off.
 
-## Follow-up still open
+## How these landed in the spec
 
-REQ-907/908/909 as drafted above have **not** yet been transcribed into
-`openspec/spec.md`. The behaviour shipped and is verified on hardware,
-but the spec is the project's authority, so until they land there the
-requirements exist only in this proposal. Worth doing before the next
-spec-affecting change, not left to drift.
+Transcribed into `openspec/spec.md` v1.2 on 2026-08-24, with one
+deliberate change from the draft above - the numbering.
+
+The draft put all three requirements in section 5 as REQ-907/908/909,
+while noting in the same breath that the first of them is a functional
+recording requirement and section 5 is for non-functional ones. The
+review agreed and said so directly: "Either put the routing claim in
+S4.3 and keep only the adapter constraint in S5, or say why S5." Doing
+what both the draft and the review preferred means the routing claim
+belongs beside REQ-301..306, and a requirement in section 4.3 takes a
+3xx number. So:
+
+| Drafted here | Landed in spec.md | Where |
+|---|---|---|
+| REQ-907 (routing) | **REQ-307** | 4.3 Recording |
+| REQ-908 (surfaces, 1-based, reporting, no silent fallback) | **REQ-907** | 5. Non-functional |
+| REQ-909 (per-device persistence, migration) | **REQ-908** | 5. Non-functional |
+
+Three claims, three ids, same content - only the section placement and
+therefore the numbers differ. REQ-909 is now unused and MUST NOT be
+recycled for something unrelated: this document's own history refers to
+it, and a reader following that trail should not land on a different
+requirement.
+
+Nothing else in this proposal changed. The behaviour described above is
+what shipped, and what the spec now requires.
