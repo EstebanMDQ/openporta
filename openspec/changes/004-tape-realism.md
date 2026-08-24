@@ -734,9 +734,34 @@ value**.
   a feedback path; a compile-time assertion that the Langevin table is
   `const`; and a stated denormal policy in the module doc. A
   *documented* denormal policy is not an enforced one - what actually
-  covers it is the `[manual]` cross-platform comparison below. The cross-platform equivalence check
-  itself cannot run on Linux-only CI and is `[manual]`: a macOS vs
-  Linux render comparison, recorded in `docs/manual-checklist.md`.
+  covers it is the cross-platform comparison below.
+
+  **That comparison is no longer `[manual]`, and it now has a measured
+  baseline.** The release workflow renders the golden through each
+  packaged binary on its own platform and prints the drift, so a macOS
+  vs Linux vs Windows comparison happens every release without anyone
+  doing it by hand. Measured 2026-08-24 against the current
+  memoryless chain, golden blessed on macOS:
+
+  | platform | worst | samples differing |
+  |---|---|---|
+  | macos-arm64 | 0 LSB | 0 / 72000 |
+  | linux-aarch64 | 2 LSB | 23257 (32%) |
+  | linux-x86_64 | **3 LSB** | 24140 (34%) |
+  | windows-x86_64 | **3 LSB** | 22260 (31%) |
+
+  **`golden.rs`'s 3 LSB tolerance therefore has zero remaining margin
+  on two of four platforms**, with a purely memoryless `tanh` that
+  cannot accumulate. This is the concrete form of the risk REQ-715
+  addresses: a stateful solver feeds its own last-bit differences back
+  into its state, and there is no headroom left to absorb them. Two
+  consequences for the implementing tasks. First, item (a) MUST measure
+  this table again on the solver before the `Full` golden is blessed -
+  if any platform exceeds 3 LSB, REQ-702's fallback applies (amend the
+  requirement and the tolerance openly, never absorb it silently).
+  Second, blessing the `Full` golden **on macOS pins the reference to
+  the one platform that reads 0**, so the tolerance must absorb the
+  full macOS-to-x86_64 divergence rather than a two-sided error.
 - **Generation loss (REQ-403)**: both models, three generations,
   **monotonic HF decay and monotonic noise-floor rise**. `Full` changes
   what each generation costs, so the compounding claim must be
@@ -1154,8 +1179,10 @@ The blocking findings:
 
 Non-blocking notes taken: REQ-709 and REQ-710 given real windows (N3);
 REQ-715's static preconditions given a verification mechanism, with the
-cross-platform check marked `[manual]` since Linux-only CI cannot run
-it (N4); REQ-717 given a bullet (N5); requirements reordered
+cross-platform check, which at the time had to be `[manual]` since
+CI ran only on Linux (N4 - since superseded: the release workflow now
+measures it on every platform automatically, and the baseline is in
+section 5); REQ-717 given a bullet (N5); requirements reordered
 monotonically (N6); "REQ-705 (addition)" promoted to **REQ-719** (N7);
 head bump's raw-vs-net gain distinction stated (N2); the two answers
 for an absent field noted (N10); and the undo journal's non-involvement
