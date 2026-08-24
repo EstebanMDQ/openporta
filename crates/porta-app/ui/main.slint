@@ -757,7 +757,13 @@ export component MainWindow inherits Window {
                         clicked => { undo-pressed(); }
                     }
                     TactileButton {
-                        text: "Bounce";
+                        // Reflects the engine's own bus-arm state, not
+                        // the last press: the engine can clear it
+                        // itself (REQ-405), and the pass ends on Stop
+                        // as well as on a second press.
+                        text: bus-armed ? "BOUNCING" : "Bounce";
+                        active: bus-armed;
+                        active-color: #e05252;
                         clicked => { bounce-pressed(); }
                     }
                     Text {
