@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "porta-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cpal",
  "fs4",
@@ -3855,7 +3855,7 @@ dependencies = [
 
 [[package]]
 name = "porta-dsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "porta-testkit",
  "rand",
@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "porta-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "porta-dsp",
  "porta-testkit",
@@ -3875,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "porta-testkit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hound",
  "rand",
