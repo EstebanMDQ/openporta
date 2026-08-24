@@ -194,11 +194,12 @@ n = 10^((9 - drive_db) / 20)
 so the default `drive_db: 9.0` gives `n = 1.0`, exactly the curve
 below. The rejected alternatives, all measured: keeping drive as a
 multiplier with `makeup = 1/drive` reproduces the **-9 dBFS ceiling**
-this change exists to remove; with `makeup = 1` it gives **+9 dB of
-gain**, failing REQ-713 by 18x (3.2b's own `gain = d*m`,
-`asymptote = m` argument applies to *any* drive-scaled family, not
-only tanh); and `x/(1+k|x|)` with `k = drive` puts the asymptote at
-`1/k`, again -9 dBFS at the default. Ignoring `drive_db` entirely
+this change exists to remove (and `x/(1+k|x|)` with `k = drive` is the
+same construction written differently - `f(dx)/d`, asymptote `1/k`,
+-9 dBFS again at the default); with `makeup = 1` it gives **+9 dB of
+gain**, failing REQ-713 by 18x, since 3.2b's own `gain = d*m`,
+`asymptote = m` argument applies to *any* drive-scaled family and not
+only to tanh. Ignoring `drive_db` entirely
 breaks `clean()`, which is load-bearing for REQ-716.
 
 Under this mapping `clean()`'s `drive_db: -30.0` gives `n = 89`, which
@@ -207,6 +208,18 @@ peak -0.07 dBFS. That is what keeps REQ-716's transparency claim true
 and the punch-crossfade, REQ-306 and click-detector suites passing.
 The mapping is monotone: `drive_db` 0 gives 0.03% THD, 6 gives 0.77%,
 9 gives 2.01%, 12 gives 3.90%.
+
+**The usable range is `drive_db <= 15` (`n >= 0.5`), and the mapping
+MUST state it**, because outside it the knob inverts: today
+`makeup = 1/drive` holds a -40 dBFS signal at exactly 0 dB for *any*
+drive, whereas under the mapping `drive_db 18` attenuates it 4.1 dB and
+`drive_db 24` attenuates it 17.3 dB, becoming an attenuator rather than
+a distorter. Both shipped characters (default 9.0, `clean()` -30.0) sit
+well inside the range. `saturation.rs`'s module doc, which explains
+makeup as "1/drive keeps quiet material at its original level
+regardless of drive", and `character.rs`'s `clean()` comment about
+tanh at unity drive, both become wrong under `Full` and are listed in
+6.3.
 
 **REQ-707/713/714's windows are stated for the default character.** At
 `drive_db: 12` the curve reads -0.906 dB at -30 dBFS, outside
@@ -217,11 +230,28 @@ character a user can build.
 
 Measured on the default curve: gain -0.007 dB at -60 dBFS and -0.230 dB at
 -30 dBFS (REQ-713), **THD 2.01% at 0 VU** (REQ-714), asymptote exactly
-1.0 and bounded under abuse (REQ-707), and it is **pure add / abs /
-divide - no transcendental at all**, so REQ-715 holds by construction.
-The near neighbour `x/(1+|x|^n)^(1/n)` at `n = 1.2` also passes
-(1.27% THD) but needs `powf`, which REQ-715 forbids on a feedback
-path. The implementing task is free to choose any curve meeting
+1.0 and bounded under abuse (REQ-707).
+
+**On `powf` and REQ-715 - a ruling, because v7 got this wrong twice.**
+The family is transcendental-free **only at `n = 1`**, the default
+operating point; every other character, `clean()` at `n = 89`
+included, needs `|x|^n` and `(.)^(1/n)`. So "pure add/abs/divide, so
+REQ-715 holds by construction" was false as a claim about the stage,
+and the parallel rejection of the `n = 1.2` neighbour "because `powf`
+is forbidden on a feedback path" was doubly wrong: **a memoryless
+waveshaper is not a feedback path at all.** REQ-715 governs stateful
+stages, where last-bit libm differences re-enter the state and
+accumulate. It does not govern a memoryless curve, which is why the
+chain has shipped a libm `tanh` since M1 without troubling REQ-702 -
+per-sample rounding differences stay bounded and sit well inside
+`golden.rs`'s 3 LSB tolerance.
+
+The ruling therefore: **REQ-715 and its grep are scoped to stateful
+and feedback stages.** `powf` in the memoryless nonlinearity is
+permitted, on exactly the standing today's `tanh` has. Once item (a)
+replaces that stage with a solver, the slot **becomes** a feedback
+path and REQ-715 applies to it in full - which is what REQ-720's
+inheritance clause is for. The implementing task is free to choose any curve meeting
 REQ-707/713/714/715; this one is offered as an existence proof so the
 task is not open-ended. Note the two requirements interact across the
 family: scanning `n`, REQ-713's 0.5 dB bound is violated at `n = 0.8`
@@ -482,16 +512,19 @@ audited by reading down.
   Crosstalk MUST NOT write to unarmed tracks (REQ-306 is preserved).
 - **REQ-713**: Under `Full`, gain MUST be within 0.5 dB of unity for
   inputs from **-60 dBFS to -30 dBFS**, measured **at 1 kHz on the
-  saturation stage in isolation**. The measurement point is part of the
+  nonlinear stage in isolation, after discarding a stated settling
+  interval**. The settling clause is inert for a memoryless curve and
+  decisive once REQ-720's solver occupies the slot: a reading taken
+  from a demagnetized state differs from the steady-state minor loop. The measurement point is part of the
   requirement: on the whole record path this would be contradicted
   outright by REQ-708, which mandates +2 to +4 dB at 60-80 Hz. The
   range is bounded downward at -60 dBFS because the requirement is
   about the formulation's curve, and there is no useful reading below
   it once the stage is embedded in a chain.
 - **REQ-714**: Under `Full`, THD MUST fall between **1% and 3% at
-  0 VU (= -18 dBFS)**, measured **at 1 kHz on the saturation stage in
-  isolation**, on a character with `flutter_depth_cents: 0.0` and hiss
-  disabled. The measurement point is part of the requirement:
+  0 VU (= -18 dBFS)**, measured **at 1 kHz on the nonlinear stage in
+  isolation, after discarding the same settling interval as REQ-713**,
+  on a character with `flutter_depth_cents: 0.0` and hiss disabled. The measurement point is part of the requirement:
   `thd_db` sums each partial over +/-2 bins (+/-2 Hz at 48 000
   samples) while the default character's 12-cent flutter smears a
   1 kHz fundamental by +/-6.9 Hz and its 7th harmonic by +/-48 Hz, so
@@ -553,6 +586,22 @@ audited by reading down.
   lands, and a solver that reintroduced a -9 dBFS ceiling would pass
   the minor-loop test below without complaint. The transfer-curve
   tests are therefore run **twice**, once at (b) and again at (a).
+
+  **The solver MUST also define what `drive_db` scales, and MUST be
+  transparent at `clean()`.** This is B2's finding one item over, and
+  it is the one that ships, since (b)'s curve is discarded when (a)
+  lands: 3.2b's knee-exponent mapping is defined for a curve family
+  that has a knee exponent, and a J-A solver has none. The implementing
+  task names the solver parameter `drive_db` scales (loop area, or the
+  input scaling ahead of it), and asserts that **`drive_db: -30.0` is
+  transparent to a stated margin** - the property REQ-716, the
+  punch-crossfade suite, REQ-306 and the click detector all rest on.
+  The solver MUST additionally stay bounded and finite under abuse:
+  `output_is_bounded_and_finite_under_abuse` is a `Saturation` unit
+  test and `Saturation` survives only on the `Simple` path, so REQ-707
+  gives the solver a floor and nothing gives it a ceiling unless this
+  clause does.
+
   Concretely: on a slow triangle sweep of amplitude A, the minor-loop
   width `|out(rising at x) - out(falling at x)|` measured at `x = A/2`
   MUST exceed a stated margin, and MUST **grow with A**. The
@@ -614,7 +663,10 @@ value**.
   Absent under `Simple`. This is the acceptance test for item (a), the
   largest item in the change - v5 shipped it with no requirement and no
   test at all.
-- **Transfer curve (REQ-707, REQ-713, REQ-714)**: at -60, -40, -30,
+- **Transfer curve (REQ-707, REQ-713, REQ-714)**, run **twice** - at
+  task (b) on the curve and again at task (a) on the solver, per
+  REQ-720 - **discarding a stated settling interval** before measuring:
+  at -60, -40, -30,
   **-18 (0 VU)**, -12, -6 and 0 dBFS, **at 1 kHz on the saturation
   stage in isolation**, on a character with `flutter_depth_cents: 0.0`
   and hiss disabled: gain within 0.5 dB of unity **from -60 to -30
@@ -671,7 +723,11 @@ value**.
   unchanged - which is what asserts the hysteresis exception in 3.3.
 - **Bit-exact-portable feedback paths (REQ-715)**: the three
   preconditions are static properties and are checked as such - a test
-  that greps the `Full` DSP sources for `mul_add` **and for the
+  that greps **the stateful `Full` stages** (the hysteresis solver, the
+  modulation-noise envelope, the head-bump biquad, level-dependent HF
+  loss, dropout tails; **not** the memoryless nonlinearity, which is
+  permitted `powf` on the same standing as today's `tanh` - see 3.2b)
+  for `mul_add` **and for the
   transcendental set (`sin`, `cos`, `tan`, `exp`, `ln`, `log`, `powf`,
   `tanh`, `sinh`, `cosh`)**, since the requirement forbids anything but
   add/sub/mul/div/sqrt and a `mul_add`-only grep would pass a `powf` on
@@ -786,6 +842,12 @@ against it at measurement time.
   the `saturation.rs` suite; `generation_loss.rs`'s thresholds; and
   `bounce_acceptance.rs::hot_generations_engage_the_quantize_clamp`,
   whose stated rationale becomes obsolete once the ceiling is removed.
+  Two **doc comments** go stale with them and are easy to miss:
+  `saturation.rs`'s module doc explaining makeup as "1/drive keeps
+  quiet material at its original level regardless of drive", and
+  `character.rs`'s `clean()` comment that "tanh at unity drive still
+  bends a -12 dBFS signal by about 2 percent". Neither is true under
+  `Full`.
 - `docs/manual-checklist.md` gains the listening pass, REQ-711's Pi
   measurement and REQ-715's cross-platform comparison.
 - `site/architecture.md` and its Spanish twin enumerate the chain
@@ -1172,7 +1234,7 @@ REQ-711 and REQ-719 given their own bullets.
 
 Ready for a sixth review.
 
-**v7 (this revision)**: a sixth review re-derived every normative number
+**v7**: a sixth review re-derived every normative number
 in the document - section 1.1's table, 3.2b's curve figures, H3's and
 H4's replacements - and reproduced all of them to the digit. Three
 blocking findings, two of which were real design gaps rather than text
@@ -1229,3 +1291,65 @@ reproducible, and what stood between this and implementation was one
 misquote and two unanswered questions. Those are answered. Sent for a
 seventh review scoped to the new B2/B3 material only, since the
 `drive_db` mapping is a design decision no reviewer has seen.
+
+**v8 (this revision)**: a seventh review, scoped to v7's new material,
+reproduced the whole `drive_db` mapping to the digit and confirmed B3
+creates no impossible requirement - it checked specifically, since
+rounds 2 and 3 both found requirement sets that were unsatisfiable, and
+found the Rayleigh law (`loop width ~ A^2`) leaves REQ-713's budget
+intact across the 12 dB from 0 VU to -30 dBFS. Three blocking findings,
+all narrow.
+
+**R1 was my error, twice in one paragraph.** v7 claimed the curve is
+"pure add/abs/divide - no transcendental at all, so REQ-715 holds by
+construction". That is true **only at `n = 1`**, the default operating
+point; every other character needs `powf`, including `clean()` at
+`n = 89`, which 30 call sites route through once the default flips. So
+the claim was false about the stage while being true about one point on
+it. And in the same breath v7 rejected the `n = 1.2` neighbour "because
+`powf` is forbidden on a feedback path" - when **a memoryless
+waveshaper is not a feedback path**, so that rejection was never valid
+and was constraining task (b)'s curve choice on a false premise.
+
+The ruling: **REQ-715 is scoped to stateful and feedback stages**,
+which is what its own text always said. `powf` in a memoryless
+nonlinearity is permitted on exactly the standing today's `tanh` has -
+the chain has shipped a libm `tanh` since M1 without troubling REQ-702,
+because per-sample rounding differences stay bounded instead of
+accumulating, and sit well inside `golden.rs`'s 3 LSB tolerance. Once
+item (a) replaces that stage with a solver the slot **becomes** a
+feedback path and REQ-715 applies in full, which is what REQ-720's
+inheritance clause already handles. Section 5's grep is rescoped to
+name the stateful stages explicitly.
+
+**R2 was B2's own finding, one item over - and on the item that
+ships.** The knee-exponent mapping answers what `drive_db` does to a
+curve family that has a knee exponent. A J-A solver has none, and
+(b)'s curve is explicitly discarded when (a) lands, so after item (a)
+nothing said how `drive_db: -30.0` reaches the transparency REQ-716,
+the punch-crossfade suite, REQ-306 and the click detector all rest on.
+REQ-720 now requires the task to name the solver parameter `drive_db`
+scales and to assert transparency at `clean()`. It also gets a
+boundedness clause: `output_is_bounded_and_finite_under_abuse` is a
+`Saturation` unit test and `Saturation` survives only on the `Simple`
+path, so REQ-707 was giving the solver a floor with nothing giving it
+a ceiling.
+
+**R3**: REQ-713 and REQ-714 specify frequency, isolation, flutter and
+hiss but said nothing about **settling** - inert for a memoryless
+curve, decisive for a solver, whose reading from a demagnetized state
+differs from the steady-state minor loop. Both now discard a stated
+settling interval, as does the verification bullet.
+
+Non-blocking taken: the **usable range** for the mapping is
+`drive_db <= 15`, stated now rather than discovered - above it the knob
+inverts into an attenuator (`drive_db 24` attenuates -40 dBFS by
+17.3 dB, where today's `makeup = 1/drive` holds it at exactly 0 dB for
+any drive); two rejected alternatives were the same construction
+written twice; and two **doc comments** go stale under `Full`
+(`saturation.rs`'s makeup rationale and `character.rs`'s `clean()`
+comment), now listed in 6.3 alongside the tests.
+
+Sent to the owner for sign-off. Seven review rounds is past the point
+where more review is the cheaper way to find defects: what remains is
+better discharged by implementing task (b) and measuring.
