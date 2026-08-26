@@ -878,8 +878,15 @@ against it at measurement time.
 - `site/architecture.md` and its Spanish twin enumerate the chain
   stages and need updating, including REQ-701's corrected order.
 - **Sequencing against change 003**: this is M8, after 003's work
-  (approved and unqueued). It does not depend on 003, but running them
-  concurrently would put two golden-affecting changes in flight.
+  (approved and unqueued). Earlier revisions justified that ordering by
+  calling 003 "golden-affecting" as well. **That is wrong**, and was
+  never checked: 003's REQ-1001-1005 cover the CLI entry point,
+  cassette resolution, the remembered path and packaging, none of which
+  touch the DSP or the `script` subcommand the golden renders through.
+  003 does not move the golden. The ordering still holds for better
+  reasons - 003 is approved, far smaller, and already modifies
+  `release.yml`, which 004 has no business touching concurrently - but
+  the golden was not one of them.
 
 ## 7. Alternatives considered and rejected
 
