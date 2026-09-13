@@ -1471,7 +1471,7 @@ Interacts with the still-unchecked M6.3: deploy/kiosk-launch.sh and both
 adopts as the default cassette precisely so the two do not diverge. If
 M6.3 later moves that path, both move together.
 
-- [ ] M8.1 openspec/spec.md (no crate): fold change 003 in as a new
+- [x] M8.1 openspec/spec.md (no crate): fold change 003 in as a new
       section 7 "Distribution and first run" holding REQ-1001..REQ-1005
       as worded in the proposal's "Requirements affected", appended
       after section 6 (Acceptance gates) so nothing existing is

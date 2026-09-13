@@ -1,8 +1,9 @@
 # openporta Specification
 
-Version 1.2 (amended by change 001, the stereo bounce bus, and change
-002, per-track input selection - see `openspec/changes/` for each
-proposal's full design and review history). This document is the
+Version 1.3 (amended by change 001, the stereo bounce bus, change 002,
+per-track input selection, and change 003, distribution and first run -
+see `openspec/changes/` for each proposal's full design and review
+history). This document is the
 constitution of the project. The decisions
 in it are settled. Changing user-visible behavior or reversing a settled
 decision REQUIRES a proposal in `openspec/changes/` reviewed by the
@@ -34,6 +35,8 @@ In scope for v1:
 - Offline (headless) operation, realtime operation on macOS, then
   Raspberry Pi 4
 - Slint UI (last milestone)
+- Prebuilt release archives for the shipped platforms, and the
+  first-run documentation that ships with them
 
 Explicitly OUT of v1 (do not implement, do not prepare abstractions for):
 
@@ -275,3 +278,55 @@ Requirements use RFC 2119 language. Every requirement MUST be verifiable by
   smoke test on macOS.
 - M5: UI drives the engine through the command queue only.
 - M6: on-device Pi smoke test with measured callback headroom documented.
+
+## 7. Distribution and first run
+
+Added by change 003. Covers how a downloaded release is launched and
+which cassette it opens. REQ-901's feature gating and REQ-902's
+realtime rules are untouched: none of this reaches the audio callback.
+
+- REQ-1001 Invoked with no arguments at all, a build including the UI
+  MUST open the UI in windowed mode on a cassette, never kiosk - kiosk
+  is for a dedicated appliance and is reached only by an explicit
+  `--kiosk`. A build without the UI MUST print the usage text, because
+  there is no UI to open and a binary that silently did nothing would
+  be worse than one that explains itself. `--help` MUST print the usage
+  text in both. Every existing subcommand is unchanged and an unknown
+  first argument still errors: this adds a default for the empty case
+  only, and reverses no existing invocation.
+- REQ-1002 When the UI is started without a cassette path, it MUST open
+  the cassette it last had open, if that path still opens as a cassette
+  (existence is not openability). Otherwise it MUST open the default
+  cassette at a documented, fixed, per-user path - `~/openporta/tape1`,
+  or `%USERPROFILE%\openporta\tape1` on Windows - resolved against a
+  candidate directory as follows: absent or empty MUST be created and
+  opened; non-empty and it opens MUST be opened; non-empty and it does
+  not open MUST be reported with its reason and exit non-zero, having
+  created, truncated or overwritten nothing. The occupancy test is "the
+  directory is non-empty", NOT "it contains a manifest.json": cassette
+  creation writes the manifest last, after the raw files, so a
+  manifest-keyed guard would destroy exactly the directory whose raw
+  audio is the only thing left worth saving. A failed remembered path
+  MUST fall through without creating anything at that path. Cassette
+  creation MUST NOT be capable of truncating: each raw file is opened
+  with `create_new`, so the API cannot overwrite an existing cassette
+  no matter which caller reaches it. An explicit path argument always
+  wins over both steps.
+- REQ-1003 Released archives MUST contain a `README.md` sourced from
+  `docs/release-readme.md`, not the repo `README.md`. That document
+  MUST state that the build is unsigned and MUST carry a launch
+  section for every platform the release ships.
+- REQ-1004 The absolute path of the last-opened cassette MUST be
+  remembered per user, outside any cassette and separately from the
+  device configuration, and MUST be updated whenever the open cassette
+  changes - including an explicit `porta-app ui <dir>`, or CLI and
+  kiosk users would never accumulate a remembered value at all. The
+  update happens on the control thread only, and a failure to write it
+  MUST NOT fail an open that already succeeded.
+- REQ-1005 If the UI cannot be opened at all, the binary MUST print the
+  usage text plus a one-line reason and exit non-zero. It MUST NOT hang
+  and MUST NOT panic.
+
+Numbering: sections 4.1 to 4.8 own `1xx` to `8xx` and section 5 owns
+`9xx`, so this block is `10xx`. The next free `9xx` id is 910, not 909:
+change 002's review retired REQ-909 and this does not lift that.
