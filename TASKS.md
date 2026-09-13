@@ -609,6 +609,19 @@ prebuilt binaries before the Pi hands-on work, not instead of it.
       shipping since M0; updated README's status table, which still
       said "UI not started" and M4 "needs a hardware session" - both
       long since done.
+      Follow-up, change 003 / M8.10: "Packages each binary with
+      README.md and LICENSE" is now stale. The archive's README.md is
+      docs/release-readme.md, not the repo README - the repo one is
+      not copied at all any more, and Verify package contents asserts
+      the swap (REQ-1003). R1 itself stays as written; this note is
+      the record, the same treatment M3.1 got when change 001
+      superseded it.
+      Noted, not done: the release smoke test runs `--help`, so it is
+      unaffected by no-args now opening a UI. Asserting REQ-1005 on
+      the SHIPPED binary per platform is a real gap - CI covers the
+      same code only on linux-x86_64 - but a bare launch on the macOS
+      and Windows runners may find a window server and block, so it
+      needs its own task rather than a quiet addition here.
       To cut a release: bump `workspace.package.version` in Cargo.toml,
       commit, `git tag vX.Y.Z && git push origin vX.Y.Z`.
       Verified 2026-08-21 with a real workflow_dispatch dry run, not
@@ -1743,7 +1756,7 @@ M6.3 later moves that path, both move together.
       instruction and no link to README.es.md - the two concrete defects
       of the document v0.1.1 actually shipped. Whether the prose is any
       good stays [manual], in M8.11)
-- [ ] M8.10 .github/workflows/release.yml: the Package step stops
+- [x] M8.10 .github/workflows/release.yml: the Package step stops
       copying the repo README.md and stages docs/release-readme.md as
       `README.md` in every archive (LICENSE unchanged); the existing
       "Verify package contents" step gains the packaging assertion -

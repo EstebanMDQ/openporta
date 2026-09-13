@@ -147,7 +147,12 @@ jobs:
           stage="openporta-${GITHUB_REF_NAME:-dev}-${{ matrix.name }}"
           mkdir "$stage"
           cp "target/${{ matrix.target }}/release/$bin" "$stage/"
-          cp README.md LICENSE "$stage/"
+          # The archive gets its own README, written for someone
+          # holding a downloaded binary - not the repo README, whose
+          # every runnable instruction is a cargo command and whose
+          # Spanish link is dead inside the archive (REQ-1003).
+          cp docs/release-readme.md "$stage/README.md"
+          cp LICENSE "$stage/"
 
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             asset="$stage.zip"
@@ -182,6 +187,16 @@ jobs:
           done
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             [ -x "$bin" ] || { echo "not executable: $bin"; exit 1; }
+          fi
+          # REQ-1003, asserted rather than assumed: the packaged README
+          # IS docs/release-readme.md. The cheapest thing to regress in
+          # a later edit of this file, and invisible until a user opens
+          # the archive.
+          cmp "$stage/README.md" docs/release-readme.md \
+            || { echo "packaged README.md is not docs/release-readme.md"; exit 1; }
+          if head -1 README.md | grep -q . && \
+             grep -qxF "$(head -1 README.md)" "$stage/README.md"; then
+            echo "the repo README leaked into the archive"; exit 1
           fi
           echo "PORTA_BIN=$PWD/$bin" >> "$GITHUB_ENV"
           echo "package contents OK"
