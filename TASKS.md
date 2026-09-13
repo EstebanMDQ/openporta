@@ -1538,7 +1538,7 @@ M6.3 later moves that path, both move together.
       `create_new` stays underneath as the race guard, which is the
       job the proposal actually gave it.
 
-- [ ] M8.4 porta-app: cassette resolution as a pure function in a new
+- [x] M8.4 porta-app: cassette resolution as a pure function in a new
       ungated module - `resolve(remembered: Option<&Path>, default:
       &Path) -> Result<PathBuf, String>` - taking its candidate paths as
       PARAMETERS rather than reading HOME itself, so no test mutates the
@@ -1584,6 +1584,12 @@ M6.3 later moves that path, both move together.
       used and the default directory is never created;
       default_cassette_dir joins openporta/tape1 under the home it is
       given)
+      The dead-code allow is unconditional for this one commit rather
+      than `cfg_attr(not(feature = "ui"), ...)`: nothing calls the
+      module in ANY feature combination until M8.5, so the narrow form
+      would have left M8.2's realtime,ui job red in between. M8.5
+      narrows it.
+
 - [ ] M8.5 porta-app: `fn dispatch(args: &[String], ui_available: bool)
       -> Action` in an ungated module, with `cfg!(feature = "ui")`
       evaluated ONCE at the call site in main() - a function that asked

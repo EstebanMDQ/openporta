@@ -4,6 +4,13 @@
 mod device_config;
 // Ungated on purpose (see its module doc) so its tests run in the
 // plain CI gate; without `realtime` nothing calls it, hence the allow.
+// Nothing calls this until M8.5 wires dispatch to it, in any feature
+// combination - so the allow is unconditional for exactly one commit
+// rather than leaving the realtime,ui CI job red until then. M8.5
+// narrows it to `cfg_attr(not(feature = "ui"), ...)`, which is where
+// it stays: the default build has no UI to resolve a cassette for.
+#[allow(dead_code)]
+mod cassette_path;
 #[cfg_attr(not(feature = "realtime"), allow(dead_code))]
 mod input_map;
 #[cfg(feature = "realtime")]
