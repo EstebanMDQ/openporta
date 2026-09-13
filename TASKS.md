@@ -1670,7 +1670,7 @@ M6.3 later moves that path, both move together.
       on_load_pressed, so remembering inside the `loaded` branch there
       catches all three.
 
-- [ ] M8.7 porta-app: when the UI cannot be opened, print the usage text
+- [x] M8.7 porta-app: when the UI cannot be opened, print the usage text
       plus a ONE-LINE reason and exit non-zero - no hang, no panic. Not
       hypothetical: the release binaries are built realtime,ui, so after
       M8.5 a bare `porta-app` over ssh on the Pi with no DISPLAY, or in

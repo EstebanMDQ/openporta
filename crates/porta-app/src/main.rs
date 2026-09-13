@@ -211,7 +211,26 @@ fn cmd_ui(dir: Option<&str>, kiosk: bool) -> Result<(), String> {
     let path = resolved
         .to_str()
         .ok_or_else(|| format!("cassette path is not valid UTF-8: {}", resolved.display()))?;
-    ui::run(path, kiosk)
+    // The requirement is on the behaviour, not on one call site:
+    // ui::run already surfaces MainWindow::new() as an Err, but
+    // backend selection can panic, and REQ-1005 forbids both a panic
+    // and a hang. A caught panic and a returned Err become the same
+    // reported failure.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ui::run(path, kiosk))) {
+        Ok(result) => result,
+        Err(payload) => Err(panic_reason(&payload)),
+    }
+}
+
+#[cfg(feature = "ui")]
+fn panic_reason(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "the UI panicked while starting".to_string()
+    }
 }
 
 /// "1R - 2 - 3 - 4R" style summary of which tracks are record-armed.
@@ -367,6 +386,19 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// REQ-1005: when the UI cannot be opened, the usage text plus ONE
+/// line saying why. Ungated so its test runs in the default build.
+/// The reason is truncated to its first line on purpose - a backtrace
+/// or a multi-line io error would bury the usage text it follows.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
+fn ui_failure_text(reason: &str) -> String {
+    let one_line = reason
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("unknown reason");
+    format!("{USAGE}\n\nerror: {one_line}")
+}
+
 #[cfg(not(feature = "realtime"))]
 fn needs_realtime(command: &str) -> String {
     format!("{command} needs the realtime feature: cargo run -p porta-app --features realtime -- {command}")
@@ -397,7 +429,13 @@ fn main() -> ExitCode {
         #[cfg(not(feature = "realtime"))]
         dispatch::Action::Live(_) => Err(needs_realtime("live")),
         #[cfg(feature = "ui")]
-        dispatch::Action::OpenUi { dir, kiosk } => cmd_ui(dir, kiosk),
+        dispatch::Action::OpenUi { dir, kiosk } => match cmd_ui(dir, kiosk) {
+            Ok(()) => Ok(()),
+            Err(reason) => {
+                eprintln!("{}", ui_failure_text(&reason));
+                return ExitCode::FAILURE;
+            }
+        },
         // Unreachable for the no-argument case, which dispatch turns
         // into Usage when there is no UI - this is an explicit `ui`.
         #[cfg(not(feature = "ui"))]
@@ -412,5 +450,33 @@ fn main() -> ExitCode {
             eprintln!("error: {msg}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_failure_text_is_usage_plus_exactly_one_line() {
+        let text = ui_failure_text("no display server");
+        assert!(text.starts_with(USAGE));
+        let tail: Vec<&str> = text[USAGE.len()..]
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        assert_eq!(tail, vec!["error: no display server"]);
+    }
+
+    #[test]
+    fn a_multi_line_reason_is_truncated_to_its_first_line() {
+        let text = ui_failure_text("cannot open display\n  at src/foo.rs:1\n  backtrace...");
+        assert!(text.ends_with("error: cannot open display"));
+        assert!(!text.contains("backtrace"));
+    }
+
+    #[test]
+    fn an_empty_reason_still_says_something() {
+        assert!(ui_failure_text("").ends_with("error: unknown reason"));
     }
 }
