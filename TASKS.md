@@ -1685,7 +1685,7 @@ M6.3 later moves that path, both move together.
       ExitCode, and the reason is one line, not a backtrace. The
       end-to-end assertion is M8.8's, which is where DISPLAY and
       WAYLAND_DISPLAY can actually be unset under a timeout)
-- [ ] M8.8 .github/workflows/ci.yml: add the bounded headless assertion
+- [x] M8.8 .github/workflows/ci.yml: add the bounded headless assertion
       to M8.2's realtime,ui job - with DISPLAY and WAYLAND_DISPLAY
       unset, `timeout 30 ./porta-app` exits non-zero within the timeout
       having printed the usage text and a reason. Bounded on purpose:
@@ -1698,6 +1698,15 @@ M6.3 later moves that path, both move together.
       own, MUST fail the step rather than pass it as "non-zero" -
       assert the code explicitly, and assert usage and the reason are
       both in the captured output)
+      Confirmed locally before pushing, in the same throwaway
+      container: with DISPLAY and WAYLAND_DISPLAY unset the real
+      realtime,ui binary exits 1 (not 124, not 0), prints the usage
+      text and exactly one reason line, "error: Could not initialize
+      backend." The same run also exercised REQ-1002 end to end - it
+      created ~/openporta/tape1 (manifest.json, tape/, undo/) before
+      failing to open the window, which is the first-run path no unit
+      test covers in a real binary.
+
 - [ ] M8.9 docs/release-readme.md (porta-app's shipped document; the
       packaging change itself is M8.10): the archive's own README,
       written for someone holding a downloaded binary rather than the

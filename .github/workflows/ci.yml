@@ -38,3 +38,24 @@ jobs:
       # clippy alone executes nothing, so the tests run too.
       - run: cargo clippy --features realtime,ui --all-targets -- -D warnings
       - run: cargo test --features realtime,ui --workspace
+      # REQ-1005, bounded on purpose: unbounded, "MUST NOT hang" would
+      # sit until the runner's own limit and the requirement would
+      # quietly become a hope. Exit 124 is timeout's own code and must
+      # fail the step rather than count as "non-zero".
+      - name: Bare launch with no display reports and exits non-zero
+        run: |
+          cargo build --features realtime,ui -p porta-app
+          set +e
+          env -u DISPLAY -u WAYLAND_DISPLAY timeout 30 ./target/debug/porta-app >launch.txt 2>&1
+          code=$?
+          set -e
+          cat launch.txt
+          if [ "$code" -eq 124 ]; then
+            echo "FAIL: hung until the timeout instead of reporting"; exit 1
+          fi
+          if [ "$code" -eq 0 ]; then
+            echo "FAIL: exited successfully with no display"; exit 1
+          fi
+          grep -q '^usage:' launch.txt || { echo "FAIL: no usage text"; exit 1; }
+          grep -q '^error: ' launch.txt || { echo "FAIL: no reason line"; exit 1; }
+          echo "reported and exited $code"
