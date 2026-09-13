@@ -1440,3 +1440,300 @@ M6.2's headroom measurement gains a bounce clause that depends on M7.7
       strip's 116px, which is also what keeps the row inside 800px
       (4x116 + 92 + 116 + spacing = 722px). Gate green across all four
       feature combinations.
+
+## M8 - Distribution and first run (openspec/changes/003, spec v1.3)
+
+Implements the approved download-and-open proposal: spec gains a new
+section 7 "Distribution and first run" (REQ-1001..REQ-1005) and section
+2 gains one in-scope line; nothing existing is renumbered or reversed.
+Dependency order below is load-bearing - each task assumes everything
+above it. Two things shape that order beyond the usual dependencies.
+
+First, the CI hole comes early. `ui` is not a default feature, so
+nothing behind `#[cfg(feature = "ui")]` is built, linted or tested on
+any commit today - only release.yml touches it, and only on a tag or
+dispatch. Most of this milestone touches ui.rs, so M8.2 closes that
+before the first gated line is written, and the assertion that needs
+new behaviour (REQ-1005) is a separate later edit to the same job
+rather than a red step sitting in CI for six commits.
+
+Second, this host has no rustup, and the Docker wrapper's `rust:1-slim`
+image cannot build `realtime,ui` at all (no libasound2-dev,
+libxkbcommon-dev, libfontconfig-dev and friends, and the wrapper
+installs no packages). So every feature-gated verification below lands
+in CI rather than locally, and the dispatch, resolver and session-config
+logic is deliberately UNGATED (the input_map.rs precedent, whose module
+doc already explains exactly why) so its tests run in the default build
+here via `scripts/cargo-docker.sh 'test --workspace'`.
+
+Interacts with the still-unchecked M6.3: deploy/kiosk-launch.sh and both
+.desktop files already hardcode `$HOME/openporta/tape1`, which M8.4
+adopts as the default cassette precisely so the two do not diverge. If
+M6.3 later moves that path, both move together.
+
+- [ ] M8.1 openspec/spec.md (no crate): fold change 003 in as a new
+      section 7 "Distribution and first run" holding REQ-1001..REQ-1005
+      as worded in the proposal's "Requirements affected", appended
+      after section 6 (Acceptance gates) so nothing existing is
+      renumbered and no cross-reference goes stale; add section 2's one
+      in-scope line, "prebuilt release archives for the shipped
+      platforms, and the first-run documentation that ships with them",
+      so the new requirements have an anchor; bump the version line to
+      1.3 naming change 003. The 10xx block stands (4.1..4.8 own
+      1xx..8xx, section 5 owns 9xx); note in passing that the next free
+      9xx id is 910, not 909 - change 002's review retired REQ-909 and
+      this does not lift that. Precedent: commit 1bf5c71, "spec: fold
+      change 002 in as REQ-307/907/908 (v1.2)". (verify:
+      `git diff openspec/spec.md | grep '^-'` shows the version line and
+      nothing else - additions only, no existing REQ id, heading or
+      section number altered; `grep -c '^- REQ-100' openspec/spec.md`
+      = 5; `git diff --name-only` lists spec.md and TASKS.md only; full
+      gate green, since nothing in any crate changes)
+- [ ] M8.2 .github/workflows/ci.yml: a second job that builds, lints AND
+      runs the `realtime,ui` feature set on every commit. Needs exactly
+      the package list release.yml's Linux legs already install -
+      pkg-config libasound2-dev libpipewire-0.3-dev libclang-dev
+      libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+      libfontconfig-dev - because ci.yml installs no system packages
+      today and without them the new required job fails on its first
+      commit; then `cargo clippy --features realtime,ui --all-targets --
+      -D warnings` AND `cargo test --features realtime,ui --workspace`,
+      since clippy alone executes nothing. The bounded headless
+      REQ-1005 assertion is deliberately NOT here: it asserts behaviour
+      M8.7 introduces and would fail against today's exit-0 usage
+      print. It lands in M8.8, on this same job. REQ-901/906. (verify:
+      actionlint clean on the YAML, then a real push - the new job green
+      on a commit that changes nothing else, and confirmed load-bearing
+      by pushing a deliberate clippy violation inside a
+      `#[cfg(feature = "ui")]` block in ui.rs, watching the job go red,
+      and reverting. Not runnable on this host - rust:1-slim has none of
+      the Slint/ALSA dev packages)
+- [ ] M8.3 porta-engine: `Project::create_with_character` opens the six
+      raw files (4 tracks + 2 bus channels) with
+      `OpenOptions::new().write(true).create_new(true)` instead of
+      `File::create`, whose truncate is what makes an auto-created
+      default cassette a tape-loss hazard in the first place. Belt and
+      braces in the engine rather than in the caller: the safety
+      property becomes "the API cannot truncate" instead of "every
+      caller remembers to check first", and the check-then-act race two
+      double-clicks in quick succession would open closes for free.
+      User-visible consequence, intended and recorded rather than
+      discovered later: `porta-app new <existing-dir>` today silently
+      wipes the cassette there, and after this it errors. REQ-1002.
+      (verify: creating into an absent or empty directory still
+      succeeds, the whole existing porta-engine suite passes unmodified
+      and the golden render stays byte-identical; create_with_character
+      against a directory already holding any one of the six raw files
+      returns Err naming the offending path, and a recursive byte
+      snapshot of that directory - manifest.json and undo/ included - is
+      identical before and after; `porta-app new` over an existing
+      cassette exits non-zero)
+- [ ] M8.4 porta-app: cassette resolution as a pure function in a new
+      ungated module - `resolve(remembered: Option<&Path>, default:
+      &Path) -> Result<PathBuf, String>` - taking its candidate paths as
+      PARAMETERS rather than reading HOME itself, so no test mutates the
+      environment and both branches run in CI's default build. Step 1:
+      the remembered path, if it OPENS as a cassette (existence is not
+      openability - it may now be a file, or a directory whose manifest
+      is gone); a failed step 1 falls through and MUST NOT create
+      anything at the remembered path. Step 2, the default cassette,
+      three normative branches: absent or EMPTY directory -> create
+      (porta-app new's defaults: 15 minutes, cassette character, seed 0,
+      so first run is deterministic and REQ-103's seed identity is
+      specified rather than incidental) and open; non-empty and it opens
+      -> open; non-empty and it does not open -> Err with the reason,
+      having created, truncated or overwritten nothing. The occupancy
+      test is "the directory is non-empty", NOT "it contains a
+      manifest.json": create_with_character writes the manifest LAST,
+      after the six raw files, so a manifest-keyed guard destroys
+      exactly the directory whose raw audio is the only thing left worth
+      saving. Also here, since it is a cassette-location question:
+      `default_cassette_dir(home: &Path)` -> `~/openporta/tape1`
+      (`%USERPROFILE%\openporta\tape1` on Windows) - deliberately
+      visible in Finder/Explorer because the Tapes picker lists siblings
+      of the open cassette, and the same path deploy/ already hardcodes
+      - plus the thin home lookup it feeds on: HOME, falling back to
+      USERPROFILE, since HOME is normally unset on Windows and today's
+      HOME-only `device_config::path()` is why the Windows case is so
+      bad. Marked `#[cfg_attr(not(feature = "ui"), allow(dead_code))]`
+      until M8.5 calls it. REQ-1002. (verify, all in the default build
+      via scripts/cargo-docker.sh: THE TAPE-LOSS REGRESSION - a default
+      location that already holds a cassette is OPENED, and its four
+      track files, both bus channels, manifest.json and every file under
+      undo/ are byte-identical afterwards; the manifest matters as much
+      as the audio, since REQ-103's character seed lives there and a
+      rewritten one changes the tape's identity even if every sample
+      survives. Plus: a default holding raw tape files with NO readable
+      manifest -> Err, exit-non-zero path, recursive byte snapshot of
+      the directory unchanged; a remembered path that is a plain file,
+      and one that is a non-cassette directory, each fall through to the
+      default with nothing created at the remembered path; nothing
+      remembered and an absent default -> created and opened, manifest
+      recording seed 0 and a 15-minute length; an EMPTY default
+      directory -> created in place; a remembered cassette that opens is
+      used and the default directory is never created;
+      default_cassette_dir joins openporta/tape1 under the home it is
+      given)
+- [ ] M8.5 porta-app: `fn dispatch(args: &[String], ui_available: bool)
+      -> Action` in an ungated module, with `cfg!(feature = "ui")`
+      evaluated ONCE at the call site in main() - a function that asked
+      cfg! internally would leave the UI-available arm unreachable in
+      CI's build, which is change 002's hole one level deeper - and
+      main() reduced to executing the returned Action. No arguments at
+      all, UI available -> open the UI WINDOWED, never kiosk (kiosk is
+      for a dedicated appliance and is reached only by an explicit
+      --kiosk). No arguments, no UI -> today's usage text, exit 0.
+      `--help`/`-h`/`help` -> usage in both arms. Unknown first
+      argument -> today's error. `ui` with no directory -> resolve via
+      M8.4 instead of erroring "ui needs a project directory", since
+      that rule belongs to "the UI was asked to start without a path"
+      and not to one spelling of it. Every existing subcommand (new,
+      script, render, export, live, devices, probe, ui) routes exactly
+      where it does today; this adds a default for the empty case only
+      and reverses no existing invocation. `porta-app --kiosk` still hits
+      the unknown-argument arm - stated because it is easy to assume
+      otherwise, and boot-into-kiosk-on-the-remembered-cassette is an
+      M6.3 follow-up, not this. REQ-1001/1002. (verify: dispatch tests
+      in the ungated module, running in the default build - no-args
+      against ui_available true and false; --help, -h and help in both
+      arms; an unknown argument produces the same string as today; each
+      of new/script/render/export/devices/probe/live/ui maps to the
+      Action it maps to today; `ui` alone -> OpenUi{dir: None}; `ui
+      <dir> --kiosk` -> OpenUi{dir: Some, kiosk: true}; no-args + UI ->
+      OpenUi{dir: None, kiosk: FALSE}; `--kiosk` alone -> unknown
+      argument. Gate green in all four feature combinations, the two ui
+      ones via M8.2's job)
+- [ ] M8.6 porta-app: remember the ABSOLUTE path of the last-opened
+      cassette, per user, in its own small file beside the device config
+      (`~/.config/openporta/session.json`) - NOT a new field on
+      DeviceConfig. audio.json is device-keyed and a cassette path is
+      not a device property, and there is a concrete hazard in
+      extending it: `device_config::load()` funnels any parse failure
+      into `unwrap_or_default()`, so a field that broke deserialization
+      would silently discard every remembered input map, a REQ-908
+      violation introduced by accident. A separate file cannot do that,
+      and "file absent" already means "nothing remembered". Absolute
+      because the working directory differs between a double-click and a
+      terminal launch. Serde type and absolute-path normalisation go in
+      an ungated module; the file I/O beside device_config.rs, reusing
+      M8.4's home lookup. Written whenever the open cassette changes -
+      launch, New, Load, and the Tapes picker all count, and so does an
+      explicit `porta-app ui <dir>`, or CLI and kiosk users would never
+      accumulate a remembered value at all - on the control thread only,
+      never on a timer and never while the transport is rolling; a write
+      failure MUST NOT fail an open that already succeeded, the
+      best-effort policy `device_config::remember` already uses. Feed
+      the loaded value into M8.4's `remembered` parameter at the main()
+      call site. REQ-1004. (verify, default build: round-trip through a
+      temp path; a config written before this field existed - `{}` and
+      an unknown-keys object - loads as "nothing remembered" with no
+      error; a relative path is stored absolute; THE REQ-908 HAZARD,
+      asserted directly - a corrupt session.json beside a VALID
+      audio.json leaves every remembered input map intact; an unwritable
+      config directory returns without error and without panicking.
+      ui.rs's open/switch call sites compile and lint under M8.2's job
+      and are exercised by M8.11's [manual] checklist)
+- [ ] M8.7 porta-app: when the UI cannot be opened, print the usage text
+      plus a ONE-LINE reason and exit non-zero - no hang, no panic. Not
+      hypothetical: the release binaries are built realtime,ui, so after
+      M8.5 a bare `porta-app` over ssh on the Pi with no DISPLAY, or in
+      a container, tries to open a window where it used to print usage.
+      `ui::run` already surfaces `MainWindow::new()` as an Err, but
+      backend selection can also panic, so the requirement is on the
+      BEHAVIOUR and not on one call site: wrap the window/backend
+      bring-up in catch_unwind and turn a returned Err and a caught
+      panic into the same reported failure. REQ-1005. (verify: an
+      ungated unit test on the failure formatter - given a reason it
+      emits the full USAGE text plus that one line and yields a non-zero
+      ExitCode, and the reason is one line, not a backtrace. The
+      end-to-end assertion is M8.8's, which is where DISPLAY and
+      WAYLAND_DISPLAY can actually be unset under a timeout)
+- [ ] M8.8 .github/workflows/ci.yml: add the bounded headless assertion
+      to M8.2's realtime,ui job - with DISPLAY and WAYLAND_DISPLAY
+      unset, `timeout 30 ./porta-app` exits non-zero within the timeout
+      having printed the usage text and a reason. Bounded on purpose:
+      unbounded, "MUST NOT hang" would sit until the runner's own limit
+      and the requirement would quietly become a hope - the failure mode
+      this proposal is careful about everywhere else. REQ-1005/906.
+      (verify: actionlint clean, then a real push - the step green, and
+      confirmed load-bearing by temporarily reverting M8.7's handling,
+      watching the step fail, and restoring it. Exit code 124, timeout's
+      own, MUST fail the step rather than pass it as "non-zero" -
+      assert the code explicitly, and assert usage and the reason are
+      both in the captured output)
+- [ ] M8.9 docs/release-readme.md (porta-app's shipped document; the
+      packaging change itself is M8.10): the archive's own README,
+      written for someone holding a downloaded binary rather than the
+      repo, in this order - Open it (double-click, and what you should
+      see); macOS Gatekeeper, first-class and up front rather than a
+      troubleshooting footnote, because on macOS it is the first thing
+      that happens: `xattr -d com.apple.quarantine ./porta-app` FIRST
+      (one line, works on every macOS version, and what a bare Unix
+      executable actually needs), then the no-terminal route, System
+      Settings > Privacy & Security > Open Anyway - "right-click ->
+      Open" is the .app-bundle gesture Apple removed for quarantined
+      downloads in macOS 15 and must not appear; Windows SmartScreen
+      (More info -> Run anyway); what it is in three lines (four mono
+      tracks, destructive, real generation loss); connect an interface,
+      with `probe` and `--in-map`, since getting sound IN is the first
+      real obstacle after launching; where cassettes live on disk; the
+      CLI, briefly, for the people who want it and not first; links to
+      the site in both languages and to the repo. States plainly that
+      the build is unsigned, what that does and does not mean, and that
+      the source and the exact build workflow are public. "Honest
+      limits" stated accurately PER PLATFORM: Linux file managers do not
+      launch a bare ELF at all and no .desktop file is packaged, macOS
+      launches it through a stray Terminal window, Windows opens a
+      console window (console-subsystem binary, PE subsystem 3), no .app
+      bundle and no icon, and the Gatekeeper step stays manual because
+      only notarization removes it. Links to site/getting-started.md
+      rather than restating it, so the two do not drift into two
+      half-maintained copies. REQ-1003. (verify:
+      crates/porta-app/tests/release_readme.rs, resolving the path from
+      CARGO_MANIFEST_DIR, asserts the file exists; that the required
+      headings appear, in this order; that the unsigned-build statement
+      is present; that Linux, macOS and Windows each appear by name in
+      the limits section; and that the document contains no `cargo run`
+      instruction and no link to README.es.md - the two concrete defects
+      of the document v0.1.1 actually shipped. Whether the prose is any
+      good stays [manual], in M8.11)
+- [ ] M8.10 .github/workflows/release.yml: the Package step stops
+      copying the repo README.md and stages docs/release-readme.md as
+      `README.md` in every archive (LICENSE unchanged); the existing
+      "Verify package contents" step gains the packaging assertion -
+      cheap, and the one thing most likely to silently regress in a
+      later workflow edit. Append a follow-up note to R1 in the
+      `## Release process` section rather than editing it: its body
+      says "Packages each binary with README.md and LICENSE", which
+      this makes stale (the same treatment M3.1 got when change 001
+      superseded it). REQ-1003. (verify:
+      `grep -n 'cp README.md' .github/workflows/release.yml` returns
+      nothing; the Verify step `cmp`s the packaged README.md against
+      docs/release-readme.md byte-for-byte and fails if the repo
+      README's own first line appears anywhere in the archive;
+      actionlint clean; then a real workflow_dispatch dry run - R1's own
+      precedent, because cross-platform packaging breaks at runtime and
+      not at parse time - with all five artifacts downloaded and each
+      one's README.md confirmed byte-identical to docs/release-readme.md
+      and LICENSE still present)
+- [ ] M8.11 docs/manual-checklist.md: a new "Change 003 - download and
+      first run" section, one block per shipped archive (macOS arm64,
+      macOS x86_64, Linux x86_64, Linux aarch64/Pi, Windows): extract
+      the archive, double-click, and record what ACTUALLY happens -
+      including the Linux and macOS caveats this change does not fix -
+      then confirm the README describes it accurately. On macOS
+      specifically, on a GENUINELY QUARANTINED download and not a
+      locally built file, which carries no quarantine attribute and
+      would "pass" meaninglessly: walk the `xattr` step, then the System
+      Settings > Open Anyway route, and then record from a real input to
+      settle the microphone-permission question - a non-bundled,
+      ad-hoc-signed executable has no Info.plist and therefore no
+      NSMicrophoneUsageDescription, so if the prompt misbehaves that
+      belongs in the README's "Honest limits" now rather than in a bug
+      report later. Also per platform: a first launch with nothing
+      remembered lands on a usable blank tape at ~/openporta/tape1, a
+      second launch reopens the same one, and deleting that directory
+      still leaves the app able to start. REQ-1001/1002/1003/1005.
+      ([manual] checklist items are the deliverable - this is the one
+      part of change 003 no cargo test can reach, and running them is
+      the gate on the next release rather than on this commit)
