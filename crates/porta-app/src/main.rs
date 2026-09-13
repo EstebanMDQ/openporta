@@ -4,13 +4,12 @@
 mod device_config;
 // Ungated on purpose (see its module doc) so its tests run in the
 // plain CI gate; without `realtime` nothing calls it, hence the allow.
-// Nothing calls this until M8.5 wires dispatch to it, in any feature
-// combination - so the allow is unconditional for exactly one commit
-// rather than leaving the realtime,ui CI job red until then. M8.5
-// narrows it to `cfg_attr(not(feature = "ui"), ...)`, which is where
-// it stays: the default build has no UI to resolve a cassette for.
-#[allow(dead_code)]
+// Resolution only has a caller in a build that has a UI to resolve a
+// cassette for; its tests run in every build, which is the point of
+// keeping the module ungated.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
 mod cassette_path;
+mod dispatch;
 #[cfg_attr(not(feature = "realtime"), allow(dead_code))]
 mod input_map;
 #[cfg(feature = "realtime")]
@@ -189,10 +188,19 @@ fn cmd_probe(args: &[String]) -> Result<(), String> {
 }
 
 #[cfg(feature = "ui")]
-fn cmd_ui(args: &[String]) -> Result<(), String> {
-    let dir = args.first().ok_or("ui needs a project directory")?;
-    let kiosk = args.iter().any(|a| a == "--kiosk");
-    ui::run(dir, kiosk)
+fn cmd_ui(dir: Option<&str>, kiosk: bool) -> Result<(), String> {
+    let resolved: PathBuf = match dir {
+        Some(d) => PathBuf::from(d),
+        None => {
+            let home = cassette_path::home_dir()
+                .ok_or("no home directory - pass a cassette path explicitly")?;
+            cassette_path::resolve(None, &cassette_path::default_cassette_dir(&home))?
+        }
+    };
+    let path = resolved
+        .to_str()
+        .ok_or_else(|| format!("cassette path is not valid UTF-8: {}", resolved.display()))?;
+    ui::run(path, kiosk)
 }
 
 /// "1R - 2 - 3 - 4R" style summary of which tracks are record-armed.
@@ -348,33 +356,44 @@ fn cmd_live(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(feature = "realtime"))]
+fn needs_realtime(command: &str) -> String {
+    format!("{command} needs the realtime feature: cargo run -p porta-app --features realtime -- {command}")
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.first().map(String::as_str) {
-        Some("new") => cmd_new(&args[1..]),
-        Some("script") => cmd_script(&args[1..]),
-        Some("render") | Some("export") => cmd_render(&args[1..]),
-        #[cfg(feature = "realtime")]
-        Some("devices") => cmd_devices(),
-        #[cfg(feature = "realtime")]
-        Some("probe") => cmd_probe(&args[1..]),
-        #[cfg(feature = "realtime")]
-        Some("live") => cmd_live(&args[1..]),
-        #[cfg(not(feature = "realtime"))]
-        Some(c @ ("devices" | "probe" | "live")) => Err(format!(
-            "{c} needs the realtime feature: cargo run -p porta-app --features realtime -- {c}"
-        )),
-        #[cfg(feature = "ui")]
-        Some("ui") => cmd_ui(&args[1..]),
-        #[cfg(not(feature = "ui"))]
-        Some(c @ "ui") => Err(format!(
-            "{c} needs the ui feature: cargo run -p porta-app --features ui -- {c}"
-        )),
-        Some("--help") | Some("-h") | Some("help") | None => {
+    // cfg! once, here, so both arms of the decision are reachable in
+    // every build's tests.
+    let result = match dispatch::dispatch(&args, cfg!(feature = "ui")) {
+        dispatch::Action::Usage => {
             println!("{USAGE}");
             return ExitCode::SUCCESS;
         }
-        Some(other) => Err(format!("unknown command '{other}'\n\n{USAGE}")),
+        dispatch::Action::New(a) => cmd_new(a),
+        dispatch::Action::Script(a) => cmd_script(a),
+        dispatch::Action::Render(a) => cmd_render(a),
+        #[cfg(feature = "realtime")]
+        dispatch::Action::Devices => cmd_devices(),
+        #[cfg(feature = "realtime")]
+        dispatch::Action::Probe(a) => cmd_probe(a),
+        #[cfg(feature = "realtime")]
+        dispatch::Action::Live(a) => cmd_live(a),
+        #[cfg(not(feature = "realtime"))]
+        dispatch::Action::Devices => Err(needs_realtime("devices")),
+        #[cfg(not(feature = "realtime"))]
+        dispatch::Action::Probe(_) => Err(needs_realtime("probe")),
+        #[cfg(not(feature = "realtime"))]
+        dispatch::Action::Live(_) => Err(needs_realtime("live")),
+        #[cfg(feature = "ui")]
+        dispatch::Action::OpenUi { dir, kiosk } => cmd_ui(dir, kiosk),
+        // Unreachable for the no-argument case, which dispatch turns
+        // into Usage when there is no UI - this is an explicit `ui`.
+        #[cfg(not(feature = "ui"))]
+        dispatch::Action::OpenUi { .. } => {
+            Err("ui needs the ui feature: cargo run -p porta-app --features ui -- ui".to_string())
+        }
+        dispatch::Action::Unknown(c) => Err(format!("unknown command '{c}'\n\n{USAGE}")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

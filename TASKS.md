@@ -1590,7 +1590,7 @@ M6.3 later moves that path, both move together.
       would have left M8.2's realtime,ui job red in between. M8.5
       narrows it.
 
-- [ ] M8.5 porta-app: `fn dispatch(args: &[String], ui_available: bool)
+- [x] M8.5 porta-app: `fn dispatch(args: &[String], ui_available: bool)
       -> Action` in an ungated module, with `cfg!(feature = "ui")`
       evaluated ONCE at the call site in main() - a function that asked
       cfg! internally would leave the UI-available arm unreachable in
@@ -1619,6 +1619,14 @@ M6.3 later moves that path, both move together.
       OpenUi{dir: None, kiosk: FALSE}; `--kiosk` alone -> unknown
       argument. Gate green in all four feature combinations, the two ui
       ones via M8.2's job)
+      Verified in both feature builds on this host after all: rather
+      than leave realtime,ui to CI alone, a throwaway container with
+      release.yml's own package list runs the same clippy and test
+      commands locally (scripts are not committed - it is the docker
+      wrapper plus an apt-get line). clippy -D warnings clean and the
+      suite green with the feature on, which is what makes it safe to
+      change cmd_ui's signature at all.
+
 - [ ] M8.6 porta-app: remember the ABSOLUTE path of the last-opened
       cassette, per user, in its own small file beside the device config
       (`~/.config/openporta/session.json`) - NOT a new field on
