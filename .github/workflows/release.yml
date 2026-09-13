@@ -194,10 +194,15 @@ jobs:
           # the archive.
           cmp "$stage/README.md" docs/release-readme.md \
             || { echo "packaged README.md is not docs/release-readme.md"; exit 1; }
-          if head -1 README.md | grep -q . && \
-             grep -qxF "$(head -1 README.md)" "$stage/README.md"; then
-            echo "the repo README leaked into the archive"; exit 1
-          fi
+          # Keyed on the repo README's two defects as an archive
+          # document, NOT on its first line: both files legitimately
+          # open with "# openporta", which is what made the first
+          # version of this check fail all five builds of v0.2.0.
+          for defect in 'cargo run' 'README.es.md'; do
+            if grep -qF "$defect" "$stage/README.md"; then
+              echo "repo README content in the archive: $defect"; exit 1
+            fi
+          done
           echo "PORTA_BIN=$PWD/$bin" >> "$GITHUB_ENV"
           echo "package contents OK"
 
