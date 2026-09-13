@@ -172,3 +172,63 @@ Findings (fill in):
   output error right as PipeWire tears the stream down, immediately
   followed by a successful save - cosmetic noise, not a failure, worth
   quieting later.
+
+## Change 003 - download and first run
+
+The one part of change 003 no `cargo test` can reach. Run these on the
+published archives, not on a locally built binary: a file built on the
+machine carries no quarantine attribute and would "pass" the macOS
+steps meaninglessly.
+
+Per archive (macos-arm64, macos-x86_64, linux-x86_64, linux-aarch64,
+windows-x86_64): download it from the release page, extract it, and
+record what ACTUALLY happens rather than what should.
+
+- [ ] macos-arm64: double-click. Expect Gatekeeper to refuse it.
+      Then `xattr -d com.apple.quarantine ./porta-app` and run it
+      again: a window opens on `~/openporta/tape1`.
+- [ ] macos-arm64, the no-terminal route, on a freshly downloaded copy:
+      System Settings > Privacy & Security > Open Anyway. Confirm the
+      README's wording matches the dialog this macOS version shows.
+- [ ] macos-arm64: record from a real input. A non-bundled,
+      ad-hoc-signed executable has no `Info.plist` and therefore no
+      `NSMicrophoneUsageDescription`, so input access is attributed to
+      whatever launched it. Note which app the prompt names, and
+      whether it appears at all. If it misbehaves, that belongs in the
+      README's "Honest limits" now, not in a bug report later.
+- [ ] macos-x86_64: same on an Intel Mac if one is available. This is
+      the one binary CI cross-links and never executes.
+- [ ] windows-x86_64: double-click, expect SmartScreen, then More info
+      > Run anyway. Confirm a console window opens behind the app, as
+      the README says it does.
+- [ ] windows-x86_64: `Unblock-File .\porta-app.exe` in PowerShell
+      works as the alternative, including the case of extracting the
+      zip with File Explorer first.
+- [ ] linux-x86_64 and linux-aarch64: confirm the honest limit is
+      honest - double-clicking in the file manager does NOT launch it,
+      and `./porta-app` from a terminal does.
+- [ ] Every platform, first run with nothing remembered: lands on a
+      usable blank tape at `~/openporta/tape1`
+      (`%USERPROFILE%\openporta\tape1` on Windows).
+- [ ] Every platform, second run: reopens the same cassette without
+      being told which.
+- [ ] Open a different cassette, quit, relaunch with no arguments: the
+      different one comes back, not tape1.
+- [ ] Delete `~/openporta/tape1` and relaunch: the app still starts
+      rather than refusing, and creates it again.
+- [ ] Put a non-cassette file inside `~/openporta/tape1` with the
+      manifest removed, then relaunch: the app reports the reason and
+      exits non-zero, and the directory's contents are untouched
+      afterwards. This is the tape-loss branch; the unit test asserts
+      it, this confirms it end to end on a real download.
+- [ ] The archive's README.md is the release one, not the repo one:
+      it opens with "Open it", mentions the signature, and contains no
+      `cargo run` instruction.
+- [ ] Read the README as someone who has never seen the project. Does
+      it describe what actually happened above? Fix whatever it gets
+      wrong before the next release.
+
+Findings (fill in):
+
+- macOS microphone prompt, which app it names: ______
+- Anything the README describes wrongly: ______

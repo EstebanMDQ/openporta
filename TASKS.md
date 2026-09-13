@@ -1775,7 +1775,7 @@ M6.3 later moves that path, both move together.
       not at parse time - with all five artifacts downloaded and each
       one's README.md confirmed byte-identical to docs/release-readme.md
       and LICENSE still present)
-- [ ] M8.11 docs/manual-checklist.md: a new "Change 003 - download and
+- [x] M8.11 docs/manual-checklist.md: a new "Change 003 - download and
       first run" section, one block per shipped archive (macOS arm64,
       macOS x86_64, Linux x86_64, Linux aarch64/Pi, Windows): extract
       the archive, double-click, and record what ACTUALLY happens -
