@@ -1707,7 +1707,7 @@ M6.3 later moves that path, both move together.
       failing to open the window, which is the first-run path no unit
       test covers in a real binary.
 
-- [ ] M8.9 docs/release-readme.md (porta-app's shipped document; the
+- [x] M8.9 docs/release-readme.md (porta-app's shipped document; the
       packaging change itself is M8.10): the archive's own README,
       written for someone holding a downloaded binary rather than the
       repo, in this order - Open it (double-click, and what you should
