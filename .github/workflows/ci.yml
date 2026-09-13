@@ -15,3 +15,26 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # `ui` is not a default feature, so the default gate above compiles
+  # nothing behind `#[cfg(feature = "ui")]` - only release.yml builds
+  # it, and only on a tag. That left ui.rs unable to fail CI at all.
+  # This job closes that hole (change 003, REQ-901/906).
+  ui:
+    name: realtime,ui gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # The same list release.yml's Linux legs install: ci.yml installs
+      # no system packages of its own, and without these the job fails
+      # on its first commit.
+      - name: Install Linux build deps (cpal + Slint)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libasound2-dev libpipewire-0.3-dev libclang-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libfontconfig-dev
+      # clippy alone executes nothing, so the tests run too.
+      - run: cargo clippy --features realtime,ui --all-targets -- -D warnings
+      - run: cargo test --features realtime,ui --workspace

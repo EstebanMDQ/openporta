@@ -1489,7 +1489,7 @@ M6.3 later moves that path, both move together.
       section number altered; `grep -c '^- REQ-100' openspec/spec.md`
       = 5; `git diff --name-only` lists spec.md and TASKS.md only; full
       gate green, since nothing in any crate changes)
-- [ ] M8.2 .github/workflows/ci.yml: a second job that builds, lints AND
+- [x] M8.2 .github/workflows/ci.yml: a second job that builds, lints AND
       runs the `realtime,ui` feature set on every commit. Needs exactly
       the package list release.yml's Linux legs already install -
       pkg-config libasound2-dev libpipewire-0.3-dev libclang-dev
