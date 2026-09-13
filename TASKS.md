@@ -1775,6 +1775,17 @@ M6.3 later moves that path, both move together.
       not at parse time - with all five artifacts downloaded and each
       one's README.md confirmed byte-identical to docs/release-readme.md
       and LICENSE still present)
+      Found by the v0.2.0 tag run, which failed all five build jobs:
+      the anti-leak check compared the repo README's FIRST LINE against
+      the packaged one, and both files legitimately open with
+      "# openporta". The cmp against docs/release-readme.md passed - the
+      packaging swap itself was correct - so the check was rejecting a
+      correct archive. Now keyed on the repo README's two actual
+      defects as an archive document, `cargo run` and README.es.md, the
+      same two release_readme.rs asserts. Worth keeping: a workflow
+      assertion that cannot be run locally has to be reasoned through
+      line by line, and this one was not.
+
 - [x] M8.11 docs/manual-checklist.md: a new "Change 003 - download and
       first run" section, one block per shipped archive (macOS arm64,
       macOS x86_64, Linux x86_64, Linux aarch64/Pi, Windows): extract
