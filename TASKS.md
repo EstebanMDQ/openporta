@@ -1508,7 +1508,7 @@ M6.3 later moves that path, both move together.
       `#[cfg(feature = "ui")]` block in ui.rs, watching the job go red,
       and reverting. Not runnable on this host - rust:1-slim has none of
       the Slint/ALSA dev packages)
-- [ ] M8.3 porta-engine: `Project::create_with_character` opens the six
+- [x] M8.3 porta-engine: `Project::create_with_character` opens the six
       raw files (4 tracks + 2 bus channels) with
       `OpenOptions::new().write(true).create_new(true)` instead of
       `File::create`, whose truncate is what makes an auto-created
@@ -1528,6 +1528,16 @@ M6.3 later moves that path, both move together.
       snapshot of that directory - manifest.json and undo/ included - is
       identical before and after; `porta-app new` over an existing
       cassette exits non-zero)
+      Finding: `create_new` alone was NOT enough for the "writes
+      nothing" half. Creation walks the six raw files in order, so
+      against a directory holding only some of them it created the
+      missing ones before tripping on the first that existed - the
+      snapshot assertion caught it. `create_with_character` now
+      pre-checks all six paths and refuses before creating anything,
+      and removes whatever it did create if a later step fails.
+      `create_new` stays underneath as the race guard, which is the
+      job the proposal actually gave it.
+
 - [ ] M8.4 porta-app: cassette resolution as a pure function in a new
       ungated module - `resolve(remembered: Option<&Path>, default:
       &Path) -> Result<PathBuf, String>` - taking its candidate paths as

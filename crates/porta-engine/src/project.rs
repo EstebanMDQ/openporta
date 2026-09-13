@@ -25,6 +25,11 @@ pub enum ProjectError {
     Io(#[from] std::io::Error),
     #[error("bad manifest: {0}")]
     Manifest(#[from] serde_json::Error),
+    /// Creation refused rather than truncating tape that is already
+    /// there (REQ-1002). Carries the file that stopped it so the
+    /// caller can say which cassette it declined to overwrite.
+    #[error("refusing to create a cassette over existing tape: {0}")]
+    WouldOverwrite(PathBuf),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -118,6 +123,25 @@ fn bus_path(dir: &Path, channel: BusChannel) -> PathBuf {
     dir.join("tape").join(name)
 }
 
+/// Zero-fill one raw tape file, refusing to touch one that already
+/// exists. `create_new` rather than `File::create` because the latter
+/// truncates: the safety property has to be "the API cannot overwrite
+/// tape" rather than "every caller remembers to check first", which
+/// also closes the check-then-act race two launches in quick
+/// succession would otherwise open (REQ-1002).
+fn create_raw_file(path: &Path, len_samples: usize) -> Result<(), ProjectError> {
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => ProjectError::WouldOverwrite(path.to_path_buf()),
+            _ => ProjectError::Io(e),
+        })?;
+    f.set_len((len_samples * 2) as u64)?;
+    Ok(())
+}
+
 impl Project {
     /// Create the directory structure and zero-fill the track files.
     pub fn create(
@@ -134,21 +158,40 @@ impl Project {
         character: TapeCharacter,
     ) -> Result<Self, ProjectError> {
         let dir = dir.into();
+        let raw: Vec<PathBuf> = (0..NUM_TRACKS)
+            .map(|t| track_path(&dir, t))
+            .chain(BusChannel::BOTH.into_iter().map(|c| bus_path(&dir, c)))
+            .collect();
+        // Refuse before touching anything, so an occupied directory is
+        // left exactly as found rather than half-populated with the
+        // files that happened to be missing (REQ-1002). create_raw_file
+        // still uses create_new below: this check is the contract, that
+        // one is what holds under a race between two launches.
+        if let Some(existing) = raw.iter().find(|p| p.exists()) {
+            return Err(ProjectError::WouldOverwrite(existing.clone()));
+        }
         fs::create_dir_all(dir.join("tape"))?;
         fs::create_dir_all(dir.join("undo"))?;
-        for t in 0..NUM_TRACKS {
-            let f = fs::File::create(track_path(&dir, t))?;
-            f.set_len((len_samples * 2) as u64)?;
-        }
-        for channel in BusChannel::BOTH {
-            let f = fs::File::create(bus_path(&dir, channel))?;
-            f.set_len((len_samples * 2) as u64)?;
+        let mut created: Vec<&PathBuf> = Vec::with_capacity(raw.len());
+        for path in &raw {
+            if let Err(e) = create_raw_file(path, len_samples) {
+                for done in created {
+                    let _ = fs::remove_file(done);
+                }
+                return Err(e);
+            }
+            created.push(path);
         }
         let project = Self {
             dir,
             manifest: Manifest::with_character(len_samples, character),
         };
-        project.write_manifest()?;
+        if let Err(e) = project.write_manifest() {
+            for done in created {
+                let _ = fs::remove_file(done);
+            }
+            return Err(e);
+        }
         Ok(project)
     }
 
@@ -429,5 +472,107 @@ mod tests {
         tape.write_bus_raw(BusChannel::Left, 0, &[3i16; 50]);
         p.save_tape(&mut tape).unwrap();
         assert!(dir.0.join("tape").join("bounce_l.raw").exists());
+    }
+}
+
+#[cfg(test)]
+mod create_guard_tests {
+    use super::*;
+    use porta_dsp::character::TapeCharacter;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("porta-create-guard-{name}"));
+            let _ = fs::remove_dir_all(&p);
+            Self(p)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Every file under `dir`, as (relative path, bytes), sorted. The
+    /// manifest and undo/ are included on purpose: REQ-103's character
+    /// seed lives in the manifest, so a rewritten one changes the
+    /// tape's identity even if every sample survives.
+    fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in fs::read_dir(&d).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path.strip_prefix(dir).unwrap().to_path_buf();
+                    out.push((rel, fs::read(&path).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn creates_into_an_absent_directory() {
+        let dir = TempDir::new("absent");
+        let p = Project::create_with_character(&dir.0, 48_000, TapeCharacter::clean()).unwrap();
+        assert_eq!(p.manifest.len_samples, 48_000);
+        for t in 0..NUM_TRACKS {
+            assert_eq!(fs::metadata(track_path(&dir.0, t)).unwrap().len(), 96_000);
+        }
+    }
+
+    #[test]
+    fn creates_into_an_empty_directory() {
+        let dir = TempDir::new("empty");
+        fs::create_dir_all(&dir.0).unwrap();
+        Project::create_with_character(&dir.0, 48_000, TapeCharacter::clean()).unwrap();
+    }
+
+    /// The tape-loss guard. Each of the six raw files is checked on its
+    /// own: the manifest is written last, so a cassette whose manifest
+    /// is gone still has audio worth refusing to truncate.
+    #[test]
+    fn refuses_to_create_over_any_existing_raw_file() {
+        for victim in 0..6 {
+            let dir = TempDir::new(&format!("occupied{victim}"));
+            Project::create_with_character(&dir.0, 48_000, TapeCharacter::clean()).unwrap();
+            let path = if victim < NUM_TRACKS {
+                track_path(&dir.0, victim)
+            } else {
+                bus_path(&dir.0, BusChannel::BOTH[victim - NUM_TRACKS])
+            };
+            // Leave only this one file behind, so the guard has to trip
+            // on it rather than on whichever file comes first.
+            for t in 0..NUM_TRACKS {
+                if track_path(&dir.0, t) != path {
+                    let _ = fs::remove_file(track_path(&dir.0, t));
+                }
+            }
+            for c in BusChannel::BOTH {
+                if bus_path(&dir.0, c) != path {
+                    let _ = fs::remove_file(bus_path(&dir.0, c));
+                }
+            }
+            fs::write(&path, vec![0x5au8; 4096]).unwrap();
+
+            let before = snapshot(&dir.0);
+            let err = match Project::create_with_character(&dir.0, 48_000, TapeCharacter::clean()) {
+                Ok(_) => panic!("creation must refuse an occupied directory"),
+                Err(e) => e,
+            };
+            match &err {
+                ProjectError::WouldOverwrite(p) => assert_eq!(p, &path),
+                other => panic!("expected WouldOverwrite, got {other:?}"),
+            }
+            assert!(err.to_string().contains(&path.display().to_string()));
+            assert_eq!(before, snapshot(&dir.0), "creation must write nothing");
+        }
     }
 }
