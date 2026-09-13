@@ -1627,7 +1627,7 @@ M6.3 later moves that path, both move together.
       suite green with the feature on, which is what makes it safe to
       change cmd_ui's signature at all.
 
-- [ ] M8.6 porta-app: remember the ABSOLUTE path of the last-opened
+- [x] M8.6 porta-app: remember the ABSOLUTE path of the last-opened
       cassette, per user, in its own small file beside the device config
       (`~/.config/openporta/session.json`) - NOT a new field on
       DeviceConfig. audio.json is device-keyed and a cassette path is
@@ -1657,6 +1657,19 @@ M6.3 later moves that path, both move together.
       config directory returns without error and without panicking.
       ui.rs's open/switch call sites compile and lint under M8.2's job
       and are exercised by M8.11's [manual] checklist)
+      Deviation from the task, with a reason: the file I/O did NOT go
+      "beside device_config.rs". That module is `#[cfg(feature =
+      "realtime")]`, so putting session persistence there would have
+      made remembering the open cassette depend on the realtime
+      feature - a UI-only build would silently never remember
+      anything. Type, normalisation and I/O all live in one ungated
+      `session_config` module instead, every function taking `home` as
+      a parameter so the tests still mutate no environment.
+      New, Load and the Tapes picker are covered by one call site:
+      on_load_tape_pressed sets the path and delegates to
+      on_load_pressed, so remembering inside the `loaded` branch there
+      catches all three.
+
 - [ ] M8.7 porta-app: when the UI cannot be opened, print the usage text
       plus a ONE-LINE reason and exit non-zero - no hang, no panic. Not
       hypothetical: the release binaries are built realtime,ui, so after

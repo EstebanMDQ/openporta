@@ -869,6 +869,7 @@ fn connect_cassette(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             });
             if created {
                 ui.set_export_path(default_export_path(&path).into());
+                crate::session_config::remember_current(std::path::Path::new(&path));
             }
             if let Some(len) = tape_len {
                 ui.set_tape_len_samples(len as f32);
@@ -902,6 +903,9 @@ fn connect_cassette(ui: &MainWindow, backend: &Rc<RefCell<Option<Backend>>>) {
             }
             if loaded {
                 ui.set_export_path(default_export_path(&path).into());
+                // Covers the Tapes picker too: on_load_tape_pressed
+                // sets the path and delegates here.
+                crate::session_config::remember_current(std::path::Path::new(&path));
             }
             ui.set_status_text(status.into());
             refresh(&ui, &slot.as_ref().unwrap().snapshot());

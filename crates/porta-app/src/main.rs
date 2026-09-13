@@ -2,20 +2,24 @@
 
 #[cfg(feature = "realtime")]
 mod device_config;
-// Ungated on purpose (see its module doc) so its tests run in the
-// plain CI gate; without `realtime` nothing calls it, hence the allow.
 // Resolution only has a caller in a build that has a UI to resolve a
 // cassette for; its tests run in every build, which is the point of
 // keeping the module ungated.
 #[cfg_attr(not(feature = "ui"), allow(dead_code))]
 mod cassette_path;
 mod dispatch;
+// Ungated on purpose (see its module doc) so its tests run in the
+// plain CI gate; without `realtime` nothing calls it, hence the allow.
 #[cfg_attr(not(feature = "realtime"), allow(dead_code))]
 mod input_map;
 #[cfg(feature = "realtime")]
 mod realtime;
 mod render;
 mod script;
+// Same shape as cassette_path: only a build with a UI has a cassette
+// to remember, and the tests run everywhere regardless.
+#[cfg_attr(not(feature = "ui"), allow(dead_code))]
+mod session_config;
 #[cfg(feature = "ui")]
 mod ui;
 
@@ -194,9 +198,16 @@ fn cmd_ui(dir: Option<&str>, kiosk: bool) -> Result<(), String> {
         None => {
             let home = cassette_path::home_dir()
                 .ok_or("no home directory - pass a cassette path explicitly")?;
-            cassette_path::resolve(None, &cassette_path::default_cassette_dir(&home))?
+            let remembered = session_config::load(&home).last_cassette;
+            cassette_path::resolve(
+                remembered.as_deref(),
+                &cassette_path::default_cassette_dir(&home),
+            )?
         }
     };
+    // An explicit `ui <dir>` counts too, or CLI and kiosk users would
+    // never accumulate a remembered value at all (REQ-1004).
+    session_config::remember_current(&resolved);
     let path = resolved
         .to_str()
         .ok_or_else(|| format!("cassette path is not valid UTF-8: {}", resolved.display()))?;
