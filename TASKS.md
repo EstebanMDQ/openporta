@@ -316,6 +316,68 @@ Verification is `cargo test --workspace` plus the noted assertions.
       --in-offset (or, if the four inputs aren't contiguous, a proper
       per-track channel list instead of a single offset).
 
+- [x] M4.7 porta-app: `devices` reports input devices' supported configs
+      (it printed only their names - realtime.rs's input loop never
+      queried them) and, for every device, the rate it is sitting at
+      RIGHT NOW via default_input_config/default_output_config. Found
+      2026-09-14 on the owner's MacBook: `devices` said 48000 was
+      supported and said nothing about the device being parked at
+      44100, which is the fact that decides whether opening it forces
+      a rate change. Diagnostic only - no behaviour change. REQ-906.
+      (verify: clippy/test green in both feature builds; the real
+      check is running `devices` on the MacBook and seeing a "now:"
+      figure per device, since no CI runner has this hardware)
+
+- [ ] M4.8 porta-app: survive the sample-rate change we cause
+      ourselves. Reported 2026-09-14, first run of the v0.2.0 release
+      on a MacBook: repeated "audio output error: Device sample rate
+      changed" / "audio input error: ...", no recording possible.
+      Mechanism, read out of cpal 0.18.2 rather than guessed:
+      device.rs:724 calls set_sample_rate() whenever the requested
+      rate differs from the device's current one, and mod.rs:175
+      registers a listener on kAudioDevicePropertyNominalSampleRate
+      that reports any change as StreamInvalidated "Device sample rate
+      changed". The engine requires 48kHz (REQ-901), the MacBook's
+      built-in codec sits at 44100, so opening a stream changes the
+      rate and the change invalidates the streams already open - and
+      the built-in mic and output share a codec, which is why both
+      report it. Today the adapter only eprintln!s the error, so the
+      session stays "connected" with a dead audio thread.
+      The fix is NOT to relax 48kHz: that is a spec invariant. Decide
+      between (a) setting the device's nominal rate before any stream
+      exists so no listener can fire, and (b) treating this specific
+      invalidation as a rebuild-once-and-continue rather than an
+      error, with a guard against a rebuild loop. (a) needs CoreAudio
+      calls cpal does not expose - a new macOS-only dependency, which
+      needs the owner's approval before it goes in.
+      (verify: an ungated unit test on the classify-the-error decision
+      - invalidated-by-rate-change maps to rebuild, device-disconnected
+      maps to report-and-stop, a second rate change inside the guard
+      window maps to report-and-stop rather than looping forever -
+      plus [manual] on the MacBook: launch, connect, record, and get a
+      take back with the devices parked at 44100 beforehand)
+
+- [ ] M4.9 porta-app: a failed handoff MUST NOT silently discard
+      recorded audio. realtime.rs:475 gives the audio CALLBACK two
+      seconds to hand the engine back; ui.rs:291 reacts to a timeout by
+      reopening the cassette from disk, which throws away whatever was
+      recorded and not yet saved. The comment there calls it "the
+      near-impossible case" - it fired repeatedly on the first real
+      macOS run, because a dead audio thread never answers a handoff.
+      No take was lost this time only because the owner had not managed
+      to record yet. At minimum the timeout must be loud and must not
+      pretend the reopened cassette is the same session; better, the
+      engine should be recoverable without a live callback (the audio
+      thread is provably stopped in this path, so taking it back is not
+      a data race - state that argument in the code, do not leave it
+      implied). REQ-902 constrains the fix: no locking or allocation on
+      the audio side of the handoff.
+      (verify: a test driving the handoff with an audio side that never
+      answers, asserting the engine comes back rather than being
+      dropped, and that the recovered engine still holds the recorded
+      samples; plus the existing timeout_when_the_audio_side_never_answers
+      test kept green)
+
 ## M5 - Slint UI
 
 - [x] M5.1 UI skeleton behind `ui` feature: transport + tape counter wired

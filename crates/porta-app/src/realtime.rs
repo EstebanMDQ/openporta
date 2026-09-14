@@ -212,6 +212,19 @@ mod handoff_tests {
     }
 }
 
+/// The rate a device is sitting at RIGHT NOW, which is what decides
+/// whether opening it at 48kHz forces CoreAudio to change it - and a
+/// change fires cpal's own nominal-rate listener as
+/// "Device sample rate changed" on every stream already open. Found
+/// 2026-09-14 on a MacBook where `devices` listed 48000 as supported
+/// and said nothing about the device being parked at 44100.
+fn current_rate(config: Result<cpal::SupportedStreamConfig, cpal::Error>) -> String {
+    match config {
+        Ok(c) => format!("{}Hz/{}ch", c.sample_rate(), c.channels()),
+        Err(e) => format!("unknown ({e})"),
+    }
+}
+
 /// List devices, so a support problem is one command away from being
 /// diagnosed rather than a mystery.
 pub fn list_devices() -> Result<Vec<String>, RealtimeError> {
@@ -235,13 +248,37 @@ pub fn list_devices() -> Result<Vec<String>, RealtimeError> {
                         )
                     })
                     .collect();
-                out.push(format!("output  {name} [{}]", rates.join(", ")));
+                out.push(format!(
+                    "output  {name} [{}] now: {}",
+                    rates.join(", "),
+                    current_rate(d.default_output_config())
+                ));
             }
             Err(e) => out.push(format!("output  {name} [unavailable: {e}]")),
         }
     }
     for d in host.input_devices()? {
-        out.push(format!("input   {d}"));
+        let name = d.to_string();
+        match d.supported_input_configs() {
+            Ok(configs) => {
+                let rates: Vec<String> = configs
+                    .map(|c| {
+                        format!(
+                            "{}-{}Hz/{}ch",
+                            c.min_sample_rate(),
+                            c.max_sample_rate(),
+                            c.channels()
+                        )
+                    })
+                    .collect();
+                out.push(format!(
+                    "input   {name} [{}] now: {}",
+                    rates.join(", "),
+                    current_rate(d.default_input_config())
+                ));
+            }
+            Err(e) => out.push(format!("input   {name} [unavailable: {e}]")),
+        }
     }
     Ok(out)
 }
